@@ -20,6 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.1"]
 mic = ["SpeechRecognition>=3.10", "PyAudio>=0.2.14"]
+search = ["sounddevice>=0.4", "webrtcvad>=2.0.10"]
+all = ["SpeechRecognition>=3.10", "PyAudio>=0.2.14", "sounddevice>=0.4", "webrtcvad>=2.0.10"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

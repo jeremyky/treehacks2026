@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -75,6 +76,8 @@ _latest_report: dict[str, Any] | None = None
 _robot_status: str = ""
 _robot_stage: str = ""
 _snapshots_dir: Path = Path("./data/snapshots")
+_snapshot_history: list[dict[str, Any]] = []  # { path, name, received_at, metadata, url, size_bytes }
+_MAX_SNAPSHOT_HISTORY = 250
 _operator_messages: list[dict[str, Any]] = []
 _comms: list[dict[str, Any]] = []  # { id, role: 'victim'|'robot'|'operator', text, timestamp }
 _MAX_OPERATOR_MESSAGES = 100
@@ -85,6 +88,24 @@ _comms_id = 0
 def _ensure_snapshots_dir() -> Path:
     _snapshots_dir.mkdir(parents=True, exist_ok=True)
     return _snapshots_dir
+
+
+def _safe_snapshot_path(name: str) -> Path | None:
+    """
+    Return a safe path under snapshots dir, or None.
+    Only allow direct children (no path traversal).
+    """
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name:
+        return None
+    try:
+        base = _snapshots_dir.resolve()
+    except Exception:
+        base = _snapshots_dir
+    p = (base / name).resolve()
+    if p.parent != base:
+        return None
+    return p
 
 
 def _append_comms(role: str, text: str) -> None:
@@ -123,20 +144,63 @@ async def post_snapshot(
     metadata: str | None = Form(None),
 ) -> JSONResponse:
     """Accept multipart JPEG upload. Save with timestamp filename."""
-    global _latest_snapshot_path
+    global _latest_snapshot_path, _snapshot_history
     dir_path = _ensure_snapshots_dir()
-    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    # Include microseconds so live feed uploads don't collide within the same second.
+    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
     ext = Path(file.filename or "snapshot.jpg").suffix or ".jpg"
     path = dir_path / f"snapshot_{now}{ext}"
     content = await file.read()
     path.write_bytes(content)
     _latest_snapshot_path = str(path)
     logger.info("Snapshot saved: %s (%d bytes)", path, len(content))
+    meta_obj: dict[str, Any] = {}
+    if metadata:
+        try:
+            parsed = json.loads(metadata)
+            if isinstance(parsed, dict):
+                meta_obj = parsed
+            else:
+                meta_obj = {"value": parsed}
+        except Exception:
+            meta_obj = {"raw": metadata}
+    entry = {
+        "path": str(path),
+        "name": path.name,
+        "received_at": datetime.utcnow().isoformat(),
+        "metadata": meta_obj,
+        "url": f"/snapshot/file/{path.name}",
+        "size_bytes": len(content),
+    }
+    _snapshot_history.append(entry)
+    _snapshot_history = _snapshot_history[-_MAX_SNAPSHOT_HISTORY:]
     return JSONResponse({
         "status": "ok",
         "path": _latest_snapshot_path,
         "metadata": metadata,
     })
+
+
+@app.get("/snapshot/history")
+async def get_snapshot_history(limit: int = 80) -> JSONResponse:
+    """Return recent snapshot uploads (oldest→newest in returned slice)."""
+    if not isinstance(limit, int):
+        limit = 80
+    limit = max(1, min(int(limit), _MAX_SNAPSHOT_HISTORY))
+    return JSONResponse({"snapshots": _snapshot_history[-limit:]})
+
+
+@app.get("/snapshot/file/{name}", response_model=None)
+async def get_snapshot_file(name: str) -> FileResponse | Response:
+    """Serve a previously-uploaded snapshot by filename."""
+    p = _safe_snapshot_path(name)
+    if not p or not p.exists():
+        return Response(status_code=404)
+    return FileResponse(
+        p,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.post("/report")

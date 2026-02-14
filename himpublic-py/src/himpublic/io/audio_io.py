@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 from abc import ABC, abstractmethod
 from typing import Protocol, runtime_checkable
@@ -46,6 +47,27 @@ def _listen_microphone(timeout_s: float) -> str | None:
         return None
 
 
+# Slower speech rate (words per minute). Default pyttsx3 is often ~200; ~130 is calmer.
+TTS_RATE_WPM = 130
+
+
+def _speak_system_say(text: str) -> bool:
+    """Use macOS 'say' command when pyttsx3 fails. Returns True if spoken. Uses slower rate."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        subprocess.run(
+            ["say", "-r", str(TTS_RATE_WPM), text],
+            check=True,
+            timeout=60,
+            capture_output=True,
+        )
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        logger.debug("System 'say' failed: %s", e)
+        return False
+
+
 class LocalAudioIO:
     """Local TTS (log/print or pyttsx3) + ASR (stdin or microphone)."""
 
@@ -57,18 +79,26 @@ class LocalAudioIO:
         self._use_mic = use_mic
 
     def speak(self, text: str) -> None:
-        """Log and print. Optionally use lightweight TTS if available."""
+        """Log and print. Use pyttsx3 at slower rate; on failure use macOS 'say' fallback."""
         logger.info("TTS: %s", text)
         if self._use_tts:
             try:
                 import pyttsx3
                 engine = pyttsx3.init()
+                try:
+                    engine.setProperty("rate", TTS_RATE_WPM)
+                except Exception:
+                    pass
                 engine.say(text)
                 engine.runAndWait()
                 return
-            except Exception:
-                pass
-        print(f"[TTS] {text}")
+            except Exception as e:
+                logger.warning("pyttsx3 TTS failed: %s — trying fallback.", e)
+                if _speak_system_say(text):
+                    return
+                print(f"[TTS] (voice unavailable: {e}) {text}", flush=True)
+                return
+        print(f"[TTS] {text}", flush=True)
 
     def listen(self, timeout_s: float) -> str | None:
         """

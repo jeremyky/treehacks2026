@@ -5,6 +5,8 @@ export interface LatestResponse {
   snapshot_path: string | null;
   report: IncidentReport | null;
   comms?: CommsEntry[];
+  status?: string;
+  stage?: string;
 }
 
 export interface CommsEntry {
@@ -20,6 +22,8 @@ export interface CommandCenterEvent {
   phase?: string;
   phase_label?: string;
   mode?: string;
+  status?: string;
+  stage?: string;
   boot_ready?: boolean;
   degraded_mode?: boolean;
   num_persons?: number;
@@ -28,8 +32,32 @@ export interface CommandCenterEvent {
   robot_map_x?: number;
   robot_map_y?: number;
   snapshot_paths?: string[];
+  decision?: {
+    action?: string;
+    mode?: string;
+    say?: string | null;
+    wait_for_response_s?: number | null;
+    used_llm?: boolean;
+    params?: Record<string, unknown>;
+  };
+  llm_proposal?: unknown;
+  last_response?: string | null;
+  last_prompt?: string | null;
   received_at?: string;
   [key: string]: unknown;
+}
+
+export interface SnapshotHistoryEntry {
+  name: string;
+  url: string;
+  received_at: string;
+  metadata?: Record<string, unknown>;
+  size_bytes?: number;
+  path?: string;
+}
+
+export interface SnapshotHistoryResponse {
+  snapshots: SnapshotHistoryEntry[];
 }
 
 export interface IncidentReport {

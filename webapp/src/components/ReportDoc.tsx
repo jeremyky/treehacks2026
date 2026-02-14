@@ -4,9 +4,9 @@ type Props = { report: IncidentReport };
 
 /** Shows the incident report / docs from the robot once created; stays visible. */
 export function ReportDoc({ report }: Props) {
-  const { incident_id, received_at, ...rest } = report;
+  const { incident_id, received_at, document: documentText, ...rest } = report;
   const restKeys = Object.keys(rest).filter(
-    (k) => rest[k] !== undefined && rest[k] !== null && rest[k] !== ''
+    (k) => rest[k] !== undefined && rest[k] !== null && rest[k] !== '' && k !== 'document'
   );
 
   return (
@@ -25,10 +25,15 @@ export function ReportDoc({ report }: Props) {
             Received: {typeof received_at === 'string' ? received_at.slice(0, 19) : String(received_at)}
           </div>
         )}
-        {restKeys.length === 0 && !incident_id && !received_at && (
+        {documentText && typeof documentText === 'string' && (
+          <pre className="whitespace-pre-wrap break-words text-[10px] text-base-200 border-l border-base-600 pl-2">
+            {documentText}
+          </pre>
+        )}
+        {!documentText && restKeys.length === 0 && !incident_id && !received_at && (
           <div className="text-base-500 italic">Report received (no details).</div>
         )}
-        {restKeys.map((key) => {
+        {!documentText && restKeys.map((key) => {
           const val = rest[key];
           if (val == null) return null;
           if (typeof val === 'object' && !Array.isArray(val)) {
@@ -45,7 +50,7 @@ export function ReportDoc({ report }: Props) {
             return (
               <div key={key}>
                 <span className="text-base-500">{key}:</span>{' '}
-                {val.map((v, i) => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(', ')}
+                {val.map((v) => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(', ')}
               </div>
             );
           }

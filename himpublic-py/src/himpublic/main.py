@@ -63,17 +63,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-level", type=str, default="INFO", help="Log level")
     p.add_argument("--debug-decisions", action="store_true",
                    help="Print each decision to terminal: camera (persons, conf) + what was heard -> action, say, listen")
+    p.add_argument("--robot-bridge-url", type=str, default="http://192.168.10.102:9090",
+                   help="Robot Bridge server URL (for --io robot). Default: http://192.168.10.102:9090")
     return p.parse_args()
 
 
 def main() -> int:
     """Run orchestrator. Returns 0 on success. Ctrl+C for clean shutdown."""
     args = parse_args()
-
-    if args.io == "robot" or (args.io == "local" and args.video == "robot"):
-        print("Error: --io robot / --video robot not yet implemented.")
-        print("Use --io local --video webcam or --io local --video file --video-path <path>")
-        return 1
 
     if args.io == "local" and args.video == "file" and not args.video_path:
         print("Error: --video-path required when --video file")
@@ -100,6 +97,7 @@ def main() -> int:
         use_mic=args.mic,
         log_level=args.log_level,
         debug_decisions=getattr(args, "debug_decisions", False),
+        robot_bridge_url=getattr(args, "robot_bridge_url", None),
     )
     setup_logging(config.log_level)
 

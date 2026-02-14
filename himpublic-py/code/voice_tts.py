@@ -6,22 +6,40 @@ Usage:
     python voice_tts.py              # Interactive menu
     python voice_tts.py --generate   # Generate all preset phrases
     python voice_tts.py --say "Hi!"  # Generate single phrase
+    python voice_tts.py --medical-demo  # Smoke test: medical_calm_female one sentence
 """
 
+import logging
 import os
 import sys
 import subprocess
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 # Output directory for audio files
 OUTPUT_DIR = Path(__file__).parent.parent / "assets" / "audio"
 
-# ElevenLabs voice ID - "Adam" voice (fitting!)
+# ElevenLabs voice ID - "Adam" voice (fitting!) — used when no preset / no env override
 VOICE_ID = "pNInz6obpgDQGcFmaJgB"
 
 # Model options: eleven_turbo_v2_5 (fast), eleven_multilingual_v2 (best quality)
 MODEL_ID = "eleven_turbo_v2_5"
+
+# TTS presets: select via preset="medical_calm_female" or env ELEVENLABS_TTS_PRESET=medical_calm_female
+TTS_PRESETS = {
+    "medical_calm_female": {
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.82,
+            "similarity_boost": 0.90,
+            "style": 0.10,
+            "speed": 0.95,
+            "use_speaker_boost": True,
+        },
+    },
+}
 
 # Preset phrases for Adam
 PHRASES = {
@@ -77,71 +95,97 @@ def get_elevenlabs_client():
     return ElevenLabs(api_key=api_key)
 
 
-def generate_audio(text: str, filename: str, client=None) -> bool:
-    """Generate audio file from text using ElevenLabs."""
+def _get_voice_id_for_preset(preset: Optional[str]) -> str:
+    """Resolve voice_id: preset-specific env, then ELEVENLABS_VOICE_ID, then default VOICE_ID."""
+    if preset == "medical_calm_female":
+        vid = os.environ.get("ELEVENLABS_VOICE_ID_MEDICAL_CALM_FEMALE")
+        if vid:
+            return vid.strip()
+    vid = os.environ.get("ELEVENLABS_VOICE_ID")
+    if vid:
+        return vid.strip()
+    return VOICE_ID
+
+
+def generate_audio(
+    text: str,
+    filename: str,
+    client=None,
+    preset: Optional[str] = None,
+) -> bool:
+    """Generate audio file from text using ElevenLabs.
+    preset: None = current default (VOICE_ID, MODEL_ID). 'medical_calm_female' = calm female medical preset.
+    Default preset can be set via env ELEVENLABS_TTS_PRESET=medical_calm_female.
+    """
     if client is None:
         client = get_elevenlabs_client()
-    
+    effective_preset = preset or os.environ.get("ELEVENLABS_TTS_PRESET") or None
+    voice_id = _get_voice_id_for_preset(effective_preset)
+    model_id = MODEL_ID
+    voice_settings = None
+    if effective_preset and effective_preset in TTS_PRESETS:
+        p = TTS_PRESETS[effective_preset]
+        model_id = p["model_id"]
+        voice_settings = p.get("voice_settings")
+    logger.info("TTS preset=%s voice_id=%s model_id=%s", effective_preset or "default", voice_id, model_id)
+    print(f"Generating: {filename} -> '{text}'")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     filepath = OUTPUT_DIR / filename
-    
-    print(f"Generating: {filename} -> '{text}'")
-    
     try:
-        audio = client.text_to_speech.convert(
-            voice_id=VOICE_ID,
-            text=text,
-            model_id=MODEL_ID,
-        )
-        
+        kwargs = {
+            "voice_id": voice_id,
+            "text": text,
+            "model_id": model_id,
+        }
+        if voice_settings:
+            kwargs["voice_settings"] = voice_settings
+        audio = client.text_to_speech.convert(**kwargs)
         with open(filepath, "wb") as f:
             for chunk in audio:
                 f.write(chunk)
-        
         print(f"  Saved: {filepath}")
         return True
-        
     except Exception as e:
         print(f"  ERROR: {e}")
         return False
 
 
-def generate_all_phrases() -> None:
-    """Generate all preset phrases."""
+def generate_all_phrases(preset: Optional[str] = None) -> None:
+    """Generate all preset phrases. preset: None or 'medical_calm_female'; env ELEVENLABS_TTS_PRESET overrides."""
     print("=" * 50)
     print("GENERATING ALL PRESET PHRASES")
     print("=" * 50)
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Voice ID: {VOICE_ID}")
+    effective = preset or os.environ.get("ELEVENLABS_TTS_PRESET") or "default"
+    print(f"TTS preset: {effective}")
     print(f"Total phrases: {len(PHRASES)}")
     print("")
-    
     client = get_elevenlabs_client()
     success = 0
     failed = 0
-    
     for filename, text in PHRASES.items():
-        if generate_audio(text, filename, client):
+        if generate_audio(text, filename, client, preset=preset):
             success += 1
         else:
             failed += 1
-    
     print("")
     print(f"Done! Generated {success}/{len(PHRASES)} files.")
     if failed > 0:
         print(f"Failed: {failed}")
 
 
-def generate_single(text: str, filename: Optional[str] = None) -> str:
-    """Generate a single phrase, return filepath."""
+def generate_single(
+    text: str,
+    filename: Optional[str] = None,
+    preset: Optional[str] = None,
+) -> str:
+    """Generate a single phrase, return filepath. preset: None or 'medical_calm_female'; env ELEVENLABS_TTS_PRESET overrides."""
     if filename is None:
-        # Generate unique filename
         import hashlib
         hash_str = hashlib.md5(text.encode()).hexdigest()[:8]
         filename = f"custom_{hash_str}.mp3"
-    
     client = get_elevenlabs_client()
-    if generate_audio(text, filename, client):
+    if generate_audio(text, filename, client, preset=preset):
         return str(OUTPUT_DIR / filename)
     return ""
 
@@ -235,18 +279,36 @@ def interactive_menu() -> None:
             print("Invalid choice.")
 
 
+MEDICAL_DEMO_SENTENCE = (
+    "I'm here to help. Stay still if you can. A responder is on the way."
+)
+MEDICAL_DEMO_FILENAME = "medical_calm_female_demo.mp3"
+
+
+def run_medical_demo() -> str:
+    """Smoke test: synthesize one medical sentence with medical_calm_female preset; save to OUTPUT_DIR. Returns filepath or ''."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = generate_single(MEDICAL_DEMO_SENTENCE, filename=MEDICAL_DEMO_FILENAME, preset="medical_calm_female")
+    if filepath:
+        print(f"Medical demo saved: {filepath}")
+    return filepath
+
+
 def main():
     import argparse
-    
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Generate voice audio with ElevenLabs")
     parser.add_argument("--generate", action="store_true", help="Generate all preset phrases")
     parser.add_argument("--say", type=str, help="Generate a single phrase")
     parser.add_argument("--play", type=str, help="Play an audio file")
     parser.add_argument("--list", action="store_true", help="List generated files")
+    parser.add_argument("--medical-demo", action="store_true", help="Smoke test: medical_calm_female one sentence to assets/audio")
     
     args = parser.parse_args()
     
-    if args.generate:
+    if args.medical_demo:
+        run_medical_demo()
+    elif args.generate:
         generate_all_phrases()
     elif args.say:
         filepath = generate_single(args.say)

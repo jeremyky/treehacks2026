@@ -1,114 +1,251 @@
 # Rescue Robot — Startup Guide
 
 One-file guide: what to run, in what order, and how the pieces work together.
+Covers **both** local (webcam) mode and **robot** (Booster K1) mode.
 
 ---
 
-## Prerequisites
+## Prerequisites (All Modes)
 
-- **API key in `.env`** — The app always reads `OPENAI_API_KEY` from a `.env` file (no modal or env var needed at runtime). Create a `.env` in **`himpublic-py/`** or in the **repo root** (`treehacks2026/`) with:
+- **API key in `.env`** — Create a `.env` in **`himpublic-py/`** or the **repo root** (`treehacks2026/`):
   ```
   OPENAI_API_KEY=sk-proj-...
   ```
-  Both the orchestrator and the command center load `.env` on startup (they look in `himpublic-py` then repo root).
+  Both the orchestrator and command center load `.env` on startup.
 
-- **Python 3.10+** with the orchestrator deps installed (from `himpublic-py/`):
+- **Python with deps** — We use the conda `(base)` environment which has everything:
   ```bash
-  cd himpublic-py && pip install -e .
+  conda activate base
   ```
-  Optional: `pip install -e ".[mic]"` for microphone (SpeechRecognition, PyAudio). For TTS: `pip install pyttsx3`. For LLM policy: `pip install openai` (key comes from `.env` above).
+  Required packages: `ultralytics`, `opencv-python`, `requests`, `fastapi`, `uvicorn`, `numpy`, `openai`, `pyttsx3`, `SpeechRecognition`.
 
 - **Node 18+** for the operator console:
   ```bash
   cd webapp && npm install
   ```
 
-- **Webcam** (for perception). The orchestrator uses the default camera; use `--video file --video-path <path>` to use a video file instead.
-
 ---
 
-## Commands to Run (3 terminals)
+## Mode A: Local (Webcam) — 3 Terminals
 
-Run these in order. Keep all three running.
+Use this mode for testing without the robot. Uses your laptop webcam + local mic/speaker.
 
-### Terminal 1: Command Center (API server)
-
-From the **repo root** or **himpublic-py**:
+### Terminal 1: Command Center
 
 ```bash
 cd himpublic-py
-python scripts/run_command_center.py
+PYTHONPATH=src python -m uvicorn himpublic.comms.command_center_server:app --host 127.0.0.1 --port 8000
 ```
 
-Or with uvicorn directly:
+### Terminal 2: Orchestrator
 
 ```bash
 cd himpublic-py
-uvicorn himpublic.comms.command_center_server:app --host 127.0.0.1 --port 8000
+PYTHONPATH=src python -m himpublic.main --io local --command-center http://127.0.0.1:8000
 ```
 
-- Listens on **http://127.0.0.1:8000**
-- Serves: `/latest`, `/snapshot/latest`, `/event`, `/snapshot`, `/operator-message`, `/operator-messages`, etc.
-- Leave this running.
-
----
-
-### Terminal 2: Orchestrator (robot / agent)
-
-From **himpublic-py** (so the package is importable):
-
-```bash
-cd himpublic-py
-python -m himpublic.main --command-center http://127.0.0.1:8000
-```
-
-- Uses webcam (or `--video file --video-path <path>`), runs perception (YOLO), audio (mic + TTS), and policy.
-- **Posts** telemetry and snapshots to the command center.
-- **Polls** `/operator-messages` and speaks any new operator messages via TTS, then acks.
-- Optional: set `OPENAI_API_KEY` (or use `--no-command-center` to run without the command center).
-
----
-
-### Terminal 3: Operator Console (frontend)
-
-From the **repo root**:
+### Terminal 3: Webapp
 
 ```bash
 cd webapp
 npm run dev
 ```
 
-- Opens the Vite dev server (usually **http://localhost:5173**).
-- Vite proxies `/api` to `http://127.0.0.1:8000`, so the app talks to the command center without CORS.
-- Open **http://localhost:5173** in a browser.
+Open **http://localhost:5173** (or whichever port Vite reports).
+
+---
+
+## Mode B: Robot (Booster K1) — 4 Terminals
+
+Use this mode when SSH'd into the K1 robot. The laptop runs the orchestrator + webapp; the robot runs a bridge server.
+
+### Network Setup
+
+| Device | IP | Role |
+|--------|-----|------|
+| Laptop | `192.168.10.1` | Orchestrator, command center, webapp |
+| K1 Robot | `192.168.10.102` | Bridge server (camera, mic, speaker) |
+
+Connect via USB-C Ethernet. SSH password: `123456`.
+
+### Terminal 1 (Robot SSH): Bridge Server
+
+```bash
+ssh booster@192.168.10.102
+source /opt/ros/humble/setup.bash && python3 ~/server.py
+```
+
+**Expected output:**
+```
+INFO: Trying ROS2 camera on topic /StereoNetNode/rectified_image ...
+INFO: ROS2 camera: first frame received from /StereoNetNode/rectified_image (544x448)
+INFO: Camera backend: ROS2 (/StereoNetNode/rectified_image)
+INFO: Motion DISABLED (safe read-only mode). Use --allow-motion to enable.
+INFO: Uvicorn running on http://0.0.0.0:9090
+```
+
+**Verify from laptop:** `curl http://192.168.10.102:9090/health`
+
+**IMPORTANT:**
+- You MUST `source /opt/ros/humble/setup.bash` before starting the server, or the camera will fail.
+- The `server.py` file lives at `~/server.py` on the robot. To update it after code changes:
+  ```bash
+  # FROM LAPTOP (not from SSH!)
+  scp himpublic-py/src/robot_bridge/server.py booster@192.168.10.102:~/server.py
+  ```
+
+### Terminal 2 (Laptop): Command Center
+
+```bash
+cd himpublic-py
+PYTHONPATH=src python -m uvicorn himpublic.comms.command_center_server:app --host 127.0.0.1 --port 8000
+```
+
+### Terminal 3 (Laptop): Orchestrator
+
+```bash
+cd himpublic-py
+PYTHONPATH=src python -m himpublic.main \
+  --io robot \
+  --robot-bridge-url http://192.168.10.102:9090 \
+  --command-center http://127.0.0.1:8000 \
+  --no-show
+```
+
+`--no-show` disables the OpenCV preview window (view the feed in the webapp instead).
+
+**What happens on startup:**
+1. Connects to robot bridge (camera + audio)
+2. Runs search phase: calls out "Where are you?", audio-scans, navigates toward sound
+3. YOLO detects person -> transitions to approach/confirm
+4. Policy loop (GPT-4o-mini) makes decisions: say, ask, rotate, wait
+5. Telemetry loop pushes snapshots to command center at ~1 Hz
+
+### Terminal 4 (Laptop): Webapp
+
+```bash
+cd webapp
+npm run dev
+```
+
+Open **http://localhost:5173** (or the port Vite reports, often `:5174` if 5173 is busy).
+
+---
+
+## Deploying Bridge Server Updates
+
+When you change `himpublic-py/src/robot_bridge/server.py`:
+
+1. **From laptop:** `scp himpublic-py/src/robot_bridge/server.py booster@192.168.10.102:~/server.py`
+2. **On robot SSH:** Ctrl+C the running server, then: `source /opt/ros/humble/setup.bash && python3 ~/server.py`
+
+---
+
+## Smoke Test (Robot Mode)
+
+Before running the full pipeline, verify the bridge works:
+
+```bash
+cd himpublic-py
+python3 scripts/smoke_test_robot.py --host 192.168.10.102
+```
+
+Tests (in order): health, state, 3 camera frames, TTS speak, 5s mic recording.
+Artifacts saved to `missions/smoke_001/`.
 
 ---
 
 ## How It All Fits Together
 
-1. **Command center** is the hub: it receives events and snapshots from the orchestrator and operator messages from the frontend, and exposes them via `/latest` and related endpoints.
+```
+Laptop                                             K1 Robot
+-----------------------------------               --------------------------
+                                     HTTP
+ Orchestrator (Python)          <------------>     Bridge Server (FastAPI:9090)
+   - RobotBridgeClient             :9090             - ROS2 Camera Subscriber
+   - BridgeVideoSource                               - ALSA Mic (arecord)
+   - BridgeAudioIO                                   - TTS (espeak -> paplay)
+   - YOLO perception                                 - Booster SDK (motion)
+   - LLM policy (GPT-4o-mini)
 
-2. **Orchestrator** (robot):
-   - Sends **telemetry** (phase, num_persons, simulated map position) and **snapshots** (camera keyframes) to the command center.
-   - When the mic picks up speech, it sends a **heard_response** event (shown as **VICTIM** in the console).
-   - When it speaks (policy or operator-relayed), it sends a **robot_said** event (shown as **ROBOT 1**).
-   - It periodically fetches **operator messages** from the command center and speaks them out loud, then acks so they are cleared.
+ Command Center (FastAPI:8000)
+   - /event    (telemetry)
+   - /snapshot (JPEG frames)
+   - /operator-message
 
-3. **Operator console** (frontend):
-   - **Polls** `/latest` every couple of seconds and shows:
-     - **Comms**: victim / robot / operator messages (from the command center comms log).
-     - **Robot feed**: latest snapshot image (`/snapshot/latest`).
-     - **Map**: robot position from telemetry (`robot_map_x`, `robot_map_y`).
-   - When you type or click a quick-reply and send, it **POSTs** to `/operator-message`; that text is added to the comms log and to the queue the orchestrator polls, so the **robot speaks it** and it appears as OPERATOR then ROBOT 1.
+ Webapp (Vite:5173)
+   - Polls /latest every 2s
+   - Shows camera feed
+   - Shows comms log
+   - Operator sends messages
+```
 
-So: **comms** = what the robot heard (victim) and said (robot), plus what you sent (operator). **Robot feed** = same images the robot is posting. **Map** = simulated position from the orchestrator’s current phase.
+1. **Robot Bridge** abstracts all hardware (camera, mic, speaker, motion) behind HTTP endpoints. The laptop pipeline has **zero ROS2 dependencies**.
+
+2. **Orchestrator** pulls frames from the bridge, runs YOLO, runs LLM policy, speaks through the bridge, and pushes telemetry to the command center.
+
+3. **Command Center** is the hub: receives events/snapshots from the orchestrator, serves them to the webapp, and relays operator messages back to the orchestrator.
+
+4. **Webapp** is a React dashboard: shows live camera feed, comms log, floor plan, robot status, and lets the operator send messages.
+
+---
+
+## CLI Reference
+
+```
+python -m himpublic.main [OPTIONS]
+
+IO Mode:
+  --io {local,robot,mock}       IO backend (default: local)
+  --video {webcam,file,robot}   Video source (default: webcam)
+  --webcam-index N              Webcam device index (default: 0)
+  --video-path PATH             Video file (when --video file)
+  --robot-bridge-url URL        Bridge server URL (default: http://192.168.10.102:9090)
+
+Command Center:
+  --command-center URL          Command center URL (default: http://127.0.0.1:8000)
+  --no-command-center           Disable command center posting
+
+Detection:
+  --yolo-model PATH             YOLO model (default: yolov8n.pt)
+  --det-thresh FLOAT            Detection threshold (default: 0.5)
+
+Behavior:
+  --show / --no-show            OpenCV preview window (default: show)
+  --no-tts                      Disable text-to-speech
+  --no-mic                      Disable microphone (use keyboard input)
+  --start-phase PHASE           Skip boot, start at a phase (e.g. search_localize)
+  --debug-decisions             Print LLM decisions to terminal
+
+Rates:
+  --telemetry-hz FLOAT          Telemetry post rate (default: 1.0)
+  --llm-hz FLOAT                LLM policy rate (default: 1.0)
+```
 
 ---
 
 ## Quick Checks
 
-- **Command center**: open http://127.0.0.1:8000/latest in a browser; you should get JSON (event, snapshot_path, report, comms).  
-- **Frontend**: open http://localhost:5173; you should see the operator console; after the orchestrator is running, comms, robot feed, and map should update.  
-- **Orchestrator**: ensure the command center URL matches (e.g. `http://127.0.0.1:8000`). If you run the command center on another host/port, pass `--command-center <url>` and set `VITE_COMMAND_CENTER_URL` in `webapp/.env` if the frontend is not proxying to it.
+| Check | Command | Expected |
+|-------|---------|----------|
+| Bridge alive | `curl http://192.168.10.102:9090/health` | `{"status":"ok","camera_ok":true,...}` |
+| Command center alive | `curl http://127.0.0.1:8000/latest` | `{"event":...,"snapshot_path":...}` |
+| Snapshot flowing | `curl -s http://127.0.0.1:8000/latest \| python3 -c "import sys,json; print(json.load(sys.stdin)['snapshot_path'])"` | Non-null path after orchestrator starts |
+| Webapp loads | Open `http://localhost:5173` | Dashboard with camera feed + comms |
 
-For full API and data-flow details, see **docs/ARCHITECTURE.md**.
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| Bridge camera "no frame within 5s" | Forgot to `source /opt/ros/humble/setup.bash` before starting server |
+| `espeak` hangs on robot | Fixed in server.py: uses `espeak --stdout \| paplay` (not bare espeak) |
+| V4L2 "can't open camera" | Normal -- perception service holds the lock. Bridge uses ROS2 instead |
+| `ModuleNotFoundError: cv2` on laptop | `conda activate base` or `pip install opencv-python` |
+| Webapp shows no feed | Orchestrator not running, or wrong command center URL |
+| `scp: No such file` | Run scp from **laptop**, not from SSH session |
+| Port 5173 in use | Vite auto-picks next port (5174, etc.) -- check terminal output |
+
+For detailed robot hardware notes, see **himpublic-py/docs/ROBOT_INTEGRATION.md**.
+For architecture details, see **docs/ARCHITECTURE.md**.

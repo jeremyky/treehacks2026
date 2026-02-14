@@ -50,6 +50,13 @@ def load_config(
     llm_stuck_seconds: float | None = None,
     openai_api_key: str | None = None,
     debug_decisions: bool | None = None,
+    robot_bridge_url: str | None = None,
+    # Search phase overrides
+    search_audio_step_deg: float | None = None,
+    search_audio_min_confidence: float | None = None,
+    search_max_audio_retries: int | None = None,
+    search_approach_area_target: float | None = None,
+    search_evidence_dir: str | None = None,
 ) -> OrchestratorConfig:
     """Load config. CLI/args override env vars."""
     def _str(k: str, d: str, override: str | None) -> str:
@@ -96,6 +103,13 @@ def load_config(
         llm_stuck_seconds=_float("HIMPUBLIC_LLM_STUCK_SECONDS", 5.0, llm_stuck_seconds),
         openai_api_key=_str("OPENAI_API_KEY", "", openai_api_key),
         debug_decisions=debug_decisions if debug_decisions is not None else (_env("HIMPUBLIC_DEBUG_DECISIONS", "0") == "1"),
+        robot_bridge_url=_str("HIMPUBLIC_ROBOT_BRIDGE_URL", "http://192.168.10.102:9090", robot_bridge_url),
+        # Search phase
+        search_audio_step_deg=_float("HIMPUBLIC_SEARCH_AUDIO_STEP_DEG", 30.0, search_audio_step_deg),
+        search_audio_min_confidence=_float("HIMPUBLIC_SEARCH_AUDIO_MIN_CONF", 0.15, search_audio_min_confidence),
+        search_max_audio_retries=_int("HIMPUBLIC_SEARCH_MAX_AUDIO_RETRIES", 3, search_max_audio_retries),
+        search_approach_area_target=_float("HIMPUBLIC_SEARCH_APPROACH_AREA", 0.20, search_approach_area_target),
+        search_evidence_dir=_str("HIMPUBLIC_SEARCH_EVIDENCE_DIR", "data/search_evidence", search_evidence_dir),
     )
 
 
@@ -167,3 +181,21 @@ class OrchestratorConfig:
 
     # Print each decision to terminal (camera + heard -> action/say/listen) for debugging
     debug_decisions: bool = False
+
+    # Robot Bridge server URL (for io_mode=robot). Bridge runs on K1 and exposes frame/audio/motion.
+    robot_bridge_url: str = "http://192.168.10.102:9090"
+
+    # ── Search phase config ──────────────────────────────────────────
+    # Audio scan: step size in degrees, per-step recording window, delay between steps
+    search_audio_step_deg: float = 30.0
+    search_audio_window_s: float = 0.4
+    search_audio_delay_s: float = 0.5
+    search_audio_min_confidence: float = 0.15
+    search_max_audio_retries: int = 3
+    # Vision: person area fraction target for approach stop
+    search_approach_area_target: float = 0.20
+    search_approach_timeout_s: float = 30.0
+    search_vision_confirm_timeout_s: float = 10.0
+    search_no_detection_rescan_s: float = 8.0
+    # Evidence output directory
+    search_evidence_dir: str = "data/search_evidence"

@@ -27,12 +27,25 @@ TRIAGE_STEPS: list[TriageStep | str] = [
     TriageStep("initial", "Are you hurt? Do you need help?", "free_text"),
     # Step 1: acknowledge (SAY) - no TriageStep, policy emits TRIAGE_ACKNOWLEDGE_SAY
     "acknowledge",  # sentinel: policy says TRIAGE_ACKNOWLEDGE_SAY
-    TriageStep("consent_photos", "Is it okay if I take photos to help medics triage you?", "yesno"),
-    TriageStep("immediate_danger", "Do you see or smell fire, smoke, water, or unstable debris nearby?", "yesno"),
-    TriageStep("breathing_difficulty", "Are you having any trouble breathing?", "yesno"),
-    TriageStep("bleeding", "Are you bleeding heavily? If yes, where?", "free_text"),  # followup: where
-    TriageStep("pain", "Where does it hurt most? Rate your pain from 0 to 10.", "free_text"),  # parse 0-10
+    # MARCH triage order (deterministic, short for TTS)
+    # M — Massive hemorrhage
+    TriageStep("massive_bleeding", "Is there heavy bleeding right now?", "yesno"),
+    TriageStep("massive_bleeding_where", "Where is the bleeding?", "free_text"),
+    # A — Airway
+    TriageStep("airway_talking", "Can you talk to me clearly?", "yesno"),
+    # R — Respiration
+    TriageStep("breathing_trouble", "Are you having trouble breathing?", "yesno"),
+    TriageStep("chest_injury", "Any chest injury or a hole in the chest?", "yesno"),
+    # C — Circulation / shock
+    TriageStep("shock_signs", "Do you feel dizzy, faint, or very cold and clammy?", "yesno"),
+    TriageStep("small_bleeds", "Any other bleeding or wounds I should know about?", "free_text"),
+    # H — Hypothermia / Head injury
+    TriageStep("head_injury", "Did you hit your head or black out?", "yesno"),
+    TriageStep("keep_warm", "Are you feeling very cold right now?", "yesno"),
+    # Documentation / handoff helpers (keep later, after life threats)
+    TriageStep("pain", "Where does it hurt most? Rate your pain from 0 to 10.", "free_text"),
     TriageStep("mobility", "Can you move your arms and legs? Are you trapped or pinned?", "free_text"),
+    TriageStep("consent_photos", "Is it okay if I take photos to help medics triage you?", "yesno"),
 ]
 
 

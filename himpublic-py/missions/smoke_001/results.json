@@ -1,0 +1,73 @@
+{
+  "base_url": "http://192.168.10.102:9090",
+  "tests": {
+    "health": {
+      "status": "ok",
+      "uptime_s": 431.0,
+      "camera_ok": true,
+      "camera_backend": "ros2",
+      "camera_source": "ros2:/StereoNetNode/rectified_image",
+      "camera_resolution": [
+        544,
+        448
+      ],
+      "allow_motion": false,
+      "sdk_available": true
+    },
+    "state": {
+      "timestamp": 1771112450.5380802,
+      "camera_ok": true,
+      "camera_backend": "ros2",
+      "allow_motion": false,
+      "sdk_available": true,
+      "sdk_members": [
+        "B1HandAction",
+        "B1HandIndex",
+        "B1HandType",
+        "B1JointCnt",
+        "B1JointIndex",
+        "B1LocoApiId",
+        "B1LocoClient",
+        "B1LowCmdPublisher",
+        "B1LowHandDataScriber",
+        "B1LowHandTouchDataScriber",
+        "B1LowStateSubscriber",
+        "B1OdometerStateSubscriber",
+        "B1RemoteControllerStateSubscriber",
+        "ChannelFactory",
+        "DexterousFingerParameter",
+        "Frame",
+        "GetModeResponse",
+        "GripperControlMode",
+        "GripperMotionParameter",
+        "HandReplyData",
+        "HandReplyParam",
+        "HandTouchData",
+        "HandTouchParam",
+        "ImuState",
+        "LowCmd",
+        "LowCmdType",
+        "LowState",
+        "MotorCmd",
+        "MotorState",
+        "Odometer"
+      ],
+      "sdk_status": "available"
+    },
+    "frames": {
+      "captured": 3,
+      "expected": 3
+    },
+    "speak": {
+      "ok": false,
+      "text": "TreeHacks robot bridge online. Smoke test in progress."
+    },
+    "record": {
+      "size_bytes": 160044
+    },
+    "summary": {
+      "passed": 4,
+      "failed": 1
+    }
+  }
+}

@@ -11,6 +11,7 @@ import { ReportDoc } from './components/ReportDoc';
 import { fetchLatest, snapshotLatestUrl, postOperatorMessage } from './api/client';
 import type { CommsMessage, MedicalAssessment, LatestResponse, CommsEntry, IncidentReport } from './api/types';
 import { nowT } from './utils/format';
+import DebugPage from './DebugPage';
 
 const POLL_MS = 2000;
 const FEED_REFRESH_MS = 1000; // Refresh robot feed image every 1s so it updates continuously
@@ -26,7 +27,7 @@ function commsToMessages(comms: CommsEntry[]): CommsMessage[] {
   }));
 }
 
-export default function App() {
+function CommandCenterPage() {
   const [medical, setMedical] = useState<MedicalAssessment | null>(null);
   const [loading, setLoading] = useState(false);
   const [latest, setLatest] = useState<LatestResponse | null>(null);
@@ -129,4 +130,9 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const isDebug = typeof window !== 'undefined' && window.location.pathname.startsWith('/debug');
+  return isDebug ? <DebugPage /> : <CommandCenterPage />;
 }

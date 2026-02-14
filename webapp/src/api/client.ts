@@ -1,6 +1,6 @@
 /** Command center API client. Uses /api when proxied (Vite), else VITE_COMMAND_CENTER_URL. */
 
-import type { LatestResponse, MedicalAssessment } from './types';
+import type { LatestResponse, MedicalAssessment, SnapshotHistoryResponse } from './types';
 
 const BASE =
   (import.meta as unknown as { env: { VITE_COMMAND_CENTER_URL?: string } }).env
@@ -22,6 +22,16 @@ export async function fetchLatest(): Promise<LatestResponse> {
 /** URL for latest snapshot image (same-origin with proxy: /api/snapshot/latest). */
 export function snapshotLatestUrl(): string {
   return `${BASE.replace(/\/$/, '')}/snapshot/latest`;
+}
+
+export async function fetchSnapshotHistory(limit = 80): Promise<SnapshotHistoryResponse> {
+  const q = Number.isFinite(limit) ? `?limit=${encodeURIComponent(String(limit))}` : '';
+  return fetchJson<SnapshotHistoryResponse>(`/snapshot/history${q}`);
+}
+
+export function absoluteCommandCenterUrl(pathOrUrl: string): string {
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${BASE.replace(/\/$/, '')}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`;
 }
 
 export async function postOperatorMessage(text: string): Promise<{ status: string }> {

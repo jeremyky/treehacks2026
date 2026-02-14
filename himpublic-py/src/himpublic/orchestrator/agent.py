@@ -15,6 +15,12 @@ from .phases import Phase, PHASE_LABELS, PHASE_ANNOUNCE, parse_phase
 from .events import EventManager, EventType
 from .policy import Action, Decision, ReflexController, LLMPolicy
 from .llm_adapter import propose_action
+from .search_phase import (
+    SearchForPersonPhase,
+    SearchPhaseConfig,
+    SearchResult,
+    RobotActions as SearchRobotActions,
+)
 from himpublic.io.robot_interface import RobotInterface
 from himpublic.io.mock_robot import MockRobot
 from himpublic.io.video_source import BaseVideoSource, WebcamVideoSource, FileVideoSource, RobotVideoSource
@@ -23,6 +29,8 @@ from himpublic.perception.person_detector import PersonDetector, draw_boxes
 from himpublic.perception.types import Observation
 from himpublic.perception.frame_store import LatestFrameStore, RingBuffer
 from himpublic.comms.command_center_client import CommandCenterClient
+from himpublic.orchestrator.dialogue_manager import TriageDialogueManager
+from himpublic.utils.event_logger import SearchEventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +80,29 @@ def _apply_decision_params(
     now: float,
     cc_client: CommandCenterClient | None = None,
 ) -> None:
-    """Apply decision.params to shared state: triage updates, capture_views, report send."""
+    """Apply decision.params to shared state: triage updates, capture_views, report send, pending-question latch."""
     params = decision.params or {}
+    # Reset search sub-phase when entering search_localize from a different phase
+    if decision.mode == Phase.SEARCH_LOCALIZE.value and state.phase != Phase.SEARCH_LOCALIZE.value:
+        state.search_sub_phase = "announce"
+        state.search_ask_retries = 0
+    # Clear pending-question state when transitioning to scan_capture
+    if decision.mode == Phase.SCAN_CAPTURE.value:
+        state.pending_question_id = None
+        state.pending_question_text = None
+        state.pending_question_asked_at = None
+        state.pending_question_retries = 0
+        state.pending_followup_key = None
+        state.pending_followup_question = None
     if "clear_last_response" in params:
         state.last_response = None
+    if "last_answer_acknowledged" in params:
+        state.last_answer_acknowledged = bool(params["last_answer_acknowledged"])
+    if "clear_pending_question" in params:
+        state.pending_question_id = None
+        state.pending_question_text = None
+        state.pending_question_asked_at = None
+        state.pending_question_retries = 0
     if "triage_step_index" in params:
         state.triage_step_index = int(params["triage_step_index"])
     if "triage_answers_delta" in params:
@@ -86,8 +113,39 @@ def _apply_decision_params(
                 v = delta["consent_photos"]
                 state.consent_for_photos = bool(v) if isinstance(v, bool) else None
         _log_triage({"timestamp": now, "triage_answers": dict(state.triage_answers), "step_index": state.triage_step_index})
+    if "current_question_key" in params:
+        state.current_question_key = params["current_question_key"]
+    if "pending_followup_key" in params:
+        state.pending_followup_key = params["pending_followup_key"]
+    if "pending_followup_question" in params:
+        state.pending_followup_question = params["pending_followup_question"]
+    # Set pending-question latch when we emit ASK (so we WAIT until response or timeout)
+    if decision.action == Action.ASK and params.get("set_pending_question") and "pending_question_id" in params:
+        state.pending_question_id = params["pending_question_id"]
+        state.pending_question_text = params.get("pending_question_text")
+        state.pending_question_asked_at = now
+        if "pending_question_retries" in params:
+            state.pending_question_retries = int(params["pending_question_retries"])
+        if "current_question_key" in params:
+            state.current_question_key = params["current_question_key"]
     if "last_prompt" in params:
         state.last_prompt = params["last_prompt"]
+    # Persist dialogue manager back from conversation_state to SharedState
+    if "_dialogue_manager" in params:
+        state.dialogue_manager = params["_dialogue_manager"]
+    # Send triage update to command center (dedup'd by dialogue manager)
+    if params.get("send_triage_update") and "triage_update_payload" in params:
+        payload = params["triage_update_payload"]
+        if cc_client and getattr(cc_client, "_enabled", False):
+            try:
+                cc_client.post_event(payload)
+            except Exception as e:
+                logger.warning("Command center triage update failed: %s", e)
+    # Search sub-phase tracking
+    if "search_sub_phase" in params:
+        state.search_sub_phase = str(params["search_sub_phase"])
+    if "search_ask_retries" in params:
+        state.search_ask_retries = int(params["search_ask_retries"])
     if "capture_views" in params:
         from himpublic.orchestrator.placeholders import capture_image
         views = params["capture_views"]
@@ -115,6 +173,11 @@ def _apply_decision_params(
             except Exception as e:
                 logger.warning("send_to_command_center failed: %s", e)
         state.report_sent = sent
+        if sent:
+            logger.info(
+                "Incident report document created and sent to command center: incident_id=%s",
+                report_payload.get("incident_id"),
+            )
         _log_triage({"timestamp": now, "report_sent": state.report_sent, "report_payload": report_payload})
 
 
@@ -183,6 +246,9 @@ class SharedState:
     """State shared between agent tasks. Uses Phase for high-level mission phase."""
     observation: Observation | None = None
     decision: Decision | None = None
+    # Debug / introspection (for command center)
+    last_decision_summary: dict | None = None  # json-safe summary of last decision
+    last_llm_proposal: dict | None = None  # raw LLM adapter output (should be json-safe)
     phase: str = Phase.SEARCH_LOCALIZE.value  # current Phase.value
     phase_entered_at: float | None = None
     boot_ready: bool = False
@@ -202,7 +268,41 @@ class SharedState:
     # No response after 2 repeats → assume victim cannot talk, proceed with visual inspection only
     no_response_count: int = 0
     assume_cannot_talk: bool = False
+    # Pending-question latch: only ASK once per question, then WAIT until response or timeout
+    pending_question_id: str | None = None
+    pending_question_text: str | None = None
+    pending_question_asked_at: float | None = None
+    pending_question_retries: int = 0
+    last_answer_acknowledged: bool = False
+    current_question_key: str | None = None  # key we are collecting answer for (step or followup)
+    # Body-part followup: insert one question before continuing triage
+    pending_followup_key: str | None = None
+    pending_followup_question: str | None = None
+    # Search sub-phase state (within SEARCH_LOCALIZE)
+    search_sub_phase: str = "announce"  # announce → ask_location → basic_search
+    search_ask_retries: int = 0
+    # Slot-based dialogue manager (persists across policy ticks)
+    dialogue_manager: TriageDialogueManager | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def set_debug_payload(self, decision_summary: dict | None, llm_proposal: dict | None) -> None:
+        async with self._lock:
+            self.last_decision_summary = decision_summary
+            self.last_llm_proposal = llm_proposal
+
+    async def get_debug_payload(self) -> dict:
+        async with self._lock:
+            return {
+                "decision": self.last_decision_summary,
+                "llm_proposal": self.last_llm_proposal,
+                "last_response": self.last_response,
+                "last_prompt": self.last_prompt,
+                "pending_question_id": self.pending_question_id,
+                "pending_question_text": self.pending_question_text,
+                "pending_question_retries": self.pending_question_retries,
+                "search_sub_phase": self.search_sub_phase,
+                "search_ask_retries": self.search_ask_retries,
+            }
 
     async def set_observation(self, obs: Observation | None) -> None:
         async with self._lock:
@@ -255,6 +355,18 @@ class SharedState:
             "report_sent": self.report_sent,
             "no_response_count": self.no_response_count,
             "assume_cannot_talk": self.assume_cannot_talk,
+            "pending_question_id": self.pending_question_id,
+            "pending_question_text": self.pending_question_text,
+            "pending_question_asked_at": self.pending_question_asked_at,
+            "pending_question_retries": self.pending_question_retries,
+            "last_answer_acknowledged": self.last_answer_acknowledged,
+            "current_question_key": self.current_question_key,
+            "pending_followup_key": self.pending_followup_key,
+            "pending_followup_question": self.pending_followup_question,
+            "search_sub_phase": self.search_sub_phase,
+            "search_ask_retries": self.search_ask_retries,
+            # Dialogue manager reference (policy.py reads/creates this)
+            "_dialogue_manager": self.dialogue_manager,
         }
 
 
@@ -283,9 +395,32 @@ class OrchestratorAgent:
         self._operator_messages_spoken_through_index: int = -1
 
         if config.io_mode == "robot":
-            raise NotImplementedError("io=robot not yet implemented.")
-
-        if config.io_mode == "local":
+            # Robot mode: use Robot Bridge server for camera, audio, and (gated) motion.
+            from himpublic.io.robot_client import RobotBridgeClient, BridgeVideoSource, BridgeAudioIO
+            bridge = RobotBridgeClient(base_url=config.robot_bridge_url)
+            self._video_source = BridgeVideoSource(bridge)
+            self._audio_io = BridgeAudioIO(bridge, use_local_asr=config.use_mic)
+            self._person_detector = PersonDetector(
+                model_path=config.yolo_model,
+                threshold=config.detection_threshold,
+            )
+            self._frame_store = LatestFrameStore()
+            self._ring_buffer = RingBuffer(
+                max_seconds=config.ring_seconds,
+                fps_sample=config.ring_fps,
+            )
+            self._cc_client = CommandCenterClient(config.command_center_url)
+            self._event_manager = EventManager(
+                ring_buffer=self._ring_buffer,
+                client=self._cc_client,
+                snapshots_dir="data/snapshots",
+                keyframe_seconds_back=5.0,
+                keyframe_count=3,
+                heartbeat_snapshot_interval_s=config.save_heartbeat_seconds,
+            )
+            self._bridge_client = bridge  # keep reference for state/motion
+            logger.info("IO mode: ROBOT (bridge at %s)", config.robot_bridge_url)
+        elif config.io_mode == "local":
             self._video_source = _create_video_source(config)
             self._audio_io = _create_audio_io(config)
             self._person_detector = PersonDetector(
@@ -347,6 +482,78 @@ class OrchestratorAgent:
         logger.info("Phase: %s – %s (ready=%s, degraded=%s)",
                     Phase.SEARCH_LOCALIZE.value, PHASE_LABELS.get(Phase.SEARCH_LOCALIZE, "Search"),
                     self._state.boot_ready, self._state.degraded_mode)
+
+    def _build_search_phase_config(self) -> SearchPhaseConfig:
+        """Build SearchPhaseConfig from the orchestrator config."""
+        mode = "robot" if self.config.io_mode == "robot" else "demo"
+        return SearchPhaseConfig(
+            audio_step_degrees=self.config.search_audio_step_deg,
+            audio_window_s=getattr(self.config, "search_audio_window_s", 0.4),
+            audio_delay_between_steps_s=getattr(self.config, "search_audio_delay_s", 0.5),
+            audio_min_confidence=self.config.search_audio_min_confidence,
+            max_audio_retries=self.config.search_max_audio_retries,
+            detection_threshold=self.config.detection_threshold,
+            yolo_model=self.config.yolo_model,
+            vision_confirm_timeout_s=getattr(self.config, "search_vision_confirm_timeout_s", 10.0),
+            approach_person_area_target=self.config.search_approach_area_target,
+            approach_timeout_s=getattr(self.config, "search_approach_timeout_s", 30.0),
+            no_detection_rescan_s=getattr(self.config, "search_no_detection_rescan_s", 8.0),
+            evidence_dir=self.config.search_evidence_dir,
+            mode=mode,
+            use_tts=self.config.use_tts,
+        )
+
+    async def _run_search_phase(self) -> SearchResult | None:
+        """Run the SearchForPersonPhase as first phase in SEARCH_LOCALIZE.
+
+        Runs in a thread executor so it doesn't block the async event loop.
+        Returns SearchResult or None if skipped.
+        """
+        phase = await self._state.get_phase()
+        if phase != Phase.SEARCH_LOCALIZE.value:
+            return None
+
+        logger.info("Running SearchForPersonPhase (integrated)")
+        search_cfg = self._build_search_phase_config()
+
+        # Build video source: use the existing one
+        video = self._video_source
+
+        # Build robot actions wrapper
+        robot_actions = SearchRobotActions(
+            mode=search_cfg.mode,
+            robot=self._robot,
+        )
+
+        event_logger = SearchEventLogger("logs/search_events.jsonl")
+
+        search_phase = SearchForPersonPhase(
+            config=search_cfg,
+            video_source=video,
+            robot_actions=robot_actions,
+            event_logger=event_logger,
+            person_detector=self._person_detector,
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, search_phase.run)
+
+        logger.info(
+            "SearchForPersonPhase result: found=%s confidence=%.3f heading=%.0f reason=%s",
+            result.found, result.confidence, result.chosen_heading_deg, result.reason,
+        )
+
+        if result.found:
+            # Transition to APPROACH_CONFIRM
+            self._state.phase = Phase.APPROACH_CONFIRM.value
+            self._state.phase_entered_at = time.monotonic()
+            self._state.pending_phase_announcement = PHASE_ANNOUNCE.get(Phase.APPROACH_CONFIRM, "Approaching.")
+            self._state.person_found_emitted = True
+            logger.info("Search phase found person — transitioning to APPROACH_CONFIRM")
+        else:
+            logger.info("Search phase did not find person (reason: %s), continuing with policy loop", result.reason)
+
+        return result
 
     async def _perception_loop(self) -> None:
         """Read frames, run YOLO, update store + ring, emit FOUND_PERSON on first confident detection."""
@@ -431,9 +638,10 @@ class OrchestratorAgent:
         while not self._stop_event.is_set():
             obs = await self._state.get_observation()
             conv = self._state.conversation_state()
+            now = time.monotonic()
+            conv["now"] = now
             phase = conv.get("phase") or conv.get("mode") or Phase.SEARCH_LOCALIZE.value
             phase_entered_at = conv.get("phase_entered_at") or 0.0
-            now = time.monotonic()
 
             llm_proposal = None
             if api_key:
@@ -451,7 +659,36 @@ class OrchestratorAgent:
                         logger.debug("LLM proposal failed: %s", e)
 
             decision = self._llm_policy.decide(obs, conv, llm_proposal=llm_proposal)
-            await self._state.set_decision(decision)
+            # Persist dialogue manager back from conv dict to SharedState (policy.py may create it)
+            if conv.get("_dialogue_manager") is not None:
+                self._state.dialogue_manager = conv["_dialogue_manager"]
+            # Don't overwrite decision with WAIT while we're waiting for a response; keep ASK so audio_loop keeps listening
+            keeping_ask = (
+                phase == Phase.ASSIST_COMMUNICATE.value
+                and decision.action == Action.WAIT
+                and conv.get("pending_question_id")
+                and not conv.get("last_response")
+            )
+            if not keeping_ask:
+                await self._state.set_decision(decision)
+            elif getattr(self.config, "debug_decisions", False):
+                logger.debug("assist_communicate: keeping previous ASK decision (waiting for response); not re-emitting ASK")
+
+            # Publish a json-safe effective decision + LLM proposal for command center debugging
+            effective = await self._state.get_decision() or decision
+            try:
+                action_str = effective.action.value if hasattr(effective.action, "value") else str(effective.action)
+            except Exception:
+                action_str = str(getattr(effective, "action", ""))
+            decision_summary = {
+                "action": action_str,
+                "mode": effective.mode,
+                "say": effective.say,
+                "wait_for_response_s": effective.wait_for_response_s,
+                "used_llm": bool(getattr(effective, "used_llm", False)),
+                "params": effective.params or {},
+            }
+            await self._state.set_debug_payload(decision_summary, llm_proposal)
             await self._state.set_phase(decision.mode)
             await self._state.set_mode(decision.mode)
             if decision.mode != phase:
@@ -501,12 +738,10 @@ class OrchestratorAgent:
         # Local: AudioIO for SAY/ASK, no robot motion. Post robot_said and robot_status to command center.
         last_spoke: str | None = None
         while not self._stop_event.is_set():
-            # Speak pending phase announcement first (status out loud + post to active robot)
+            # Post phase to comms chat only (do not speak phase out loud)
             pending = self._state.pending_phase_announcement
             if pending:
                 self._state.pending_phase_announcement = None
-                if self._audio_io:
-                    self._audio_io.speak(pending)
                 phase = self._state.phase
                 if self._cc_client and self._cc_client._enabled:
                     self._cc_client.post_event({
@@ -606,6 +841,7 @@ class OrchestratorAgent:
         while not self._stop_event.is_set():
             obs = await self._state.get_observation()
             phase = await self._state.get_phase()
+            debug_payload = await self._state.get_debug_payload()
             self._update_simulated_position(phase, obs)
             p_parsed = parse_phase(phase)
             status = PHASE_ANNOUNCE.get(p_parsed, phase)
@@ -625,6 +861,7 @@ class OrchestratorAgent:
                 "robot_map_x": round(self._sim_map_x, 1),
                 "robot_map_y": round(self._sim_map_y, 1),
             }
+            payload.update(debug_payload)
             self._cc_client.post_event(payload)
             # Post latest frame every tick so command center robot feed updates continuously
             if self._frame_store is not None:
@@ -642,6 +879,13 @@ class OrchestratorAgent:
         """Run all tasks until stop requested. Then cancel tasks and cleanup."""
         logger.info("Agent starting (io=%s, video=%s). Ctrl+C to stop.", self.config.io_mode, self.config.video_mode)
         await self._boot_check()
+
+        # Run SearchForPersonPhase as the first phase in SEARCH_LOCALIZE
+        # This is a blocking call (in executor) before the main async loops start
+        search_result = await self._run_search_phase()
+        if search_result:
+            logger.info("Search phase completed (found=%s), starting main loops", search_result.found)
+
         self._tasks = []
         try:
             if self._video_source is not None:
