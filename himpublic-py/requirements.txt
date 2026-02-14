@@ -1,0 +1,2 @@
+# HIM Public orchestrator - minimal deps (stdlib only for now)
+# For editable install: pip install -e .

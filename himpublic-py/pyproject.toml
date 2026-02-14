@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "himpublic"
+version = "0.1.0"
+description = "Python orchestrator-first robot system for TreeHacks"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics>=8.0",
+    "opencv-python>=4.8",
+    "fastapi>=0.100",
+    "uvicorn>=0.22",
+    "requests>=2.28",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.1"]
+mic = ["SpeechRecognition>=3.10", "PyAudio>=0.2.14"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

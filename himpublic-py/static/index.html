@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HIM Command Center</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: #1a1a1a; color: #eee; }
+    .layout { display: flex; gap: 12px; min-height: 90vh; }
+    .camera { flex: 1; background: #111; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .camera img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .camera .placeholder { color: #666; }
+    .chat { width: 320px; display: flex; flex-direction: column; background: #222; border-radius: 8px; overflow: hidden; }
+    .chat-title { padding: 8px 12px; background: #333; font-weight: 600; }
+    .chat-messages { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
+    .msg { margin-bottom: 8px; padding: 8px; border-radius: 6px; background: #2a2a2a; }
+    .msg.system { background: #1e3a5f; }
+    .msg.detection { background: #2d3a2d; }
+    .msg time { color: #888; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1 style="margin:0 0 12px 0;">HIM Command Center</h1>
+  <div class="layout">
+    <div class="camera">
+      <img id="snapshot" src="" alt="Camera feed" style="display:none;" />
+      <span id="placeholder" class="placeholder">Waiting for camera snapshot…</span>
+    </div>
+    <div class="chat">
+      <div class="chat-title">Status & Output</div>
+      <div id="messages" class="chat-messages"></div>
+    </div>
+  </div>
+  <script>
+    const img = document.getElementById('snapshot');
+    const placeholder = document.getElementById('placeholder');
+    const messages = document.getElementById('messages');
+
+    function addMsg(text, cls = '') {
+      const div = document.createElement('div');
+      div.className = 'msg ' + cls;
+      div.innerHTML = '<time>' + new Date().toLocaleTimeString() + '</time><br>' + text;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/latest');
+        const data = await r.json();
+        if (data.snapshot_path) {
+          img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'block'; };
+          img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+          img.src = '/snapshot/latest?t=' + Date.now();
+        }
+        if (data.event) {
+          const e = data.event;
+          const lastId = messages.dataset.lastEventId || '';
+          const eventId = e.received_at || e.timestamp || '';
+          if (eventId !== lastId) {
+            messages.dataset.lastEventId = eventId;
+            const state = e.state || 'unknown';
+            const persons = e.num_persons ?? (e.detections?.length ?? 0);
+            let text = 'State: ' + state + ' | Persons: ' + persons;
+            if (e.summary) text += '<br>' + e.summary;
+            if (e.detections?.length) {
+              text += '<br>Detections: ' + e.detections.map(d => d.cls_name + ' ' + (d.score * 100).toFixed(0) + '%').join(', ');
+            }
+            addMsg(text, persons > 0 ? 'detection' : 'system');
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    poll();
+    setInterval(poll, 1000);
+  </script>
+</body>
+</html>
