@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  --color-base-950: #09090b;
+  --color-base-900: #0f0f12;
+  --color-base-850: #141418;
+  --color-base-800: #19191f;
+  --color-base-750: #1e1e25;
+  --color-base-700: #25252d;
+  --color-base-600: #2e2e38;
+  --color-base-500: #3a3a46;
+  --color-base-400: #52525e;
+  --color-base-300: #71717a;
+  --color-base-200: #a1a1aa;
+  --color-base-100: #d4d4d8;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes ping-ring {
+  0% { transform: scale(1); opacity: 0.5; }
+  100% { transform: scale(2.8); opacity: 0; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-blink { animation: blink 2s ease-in-out infinite; }
+.animate-ping-ring { animation: ping-ring 2s ease-out infinite; }
+.animate-spin-slow { animation: spin 0.8s linear infinite; }
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #25252d #0f0f12;
+}
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #25252d; border-radius: 2px; }
+body { margin: 0; overflow: hidden; }
+input::placeholder { color: #52525e; }

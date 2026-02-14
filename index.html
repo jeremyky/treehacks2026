@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rescue Robot — Operator Console</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            base: {
+              950: '#09090b', 900: '#0f0f12', 850: '#141418',
+              800: '#19191f', 750: '#1e1e25', 700: '#25252d',
+              600: '#2e2e38', 500: '#3a3a46', 400: '#52525e',
+              300: '#71717a', 200: '#a1a1aa', 100: '#d4d4d8',
+            },
+          },
+          fontFamily: {
+            mono: ['"JetBrains Mono"', '"SF Mono"', '"Cascadia Code"', 'Consolas', 'monospace'],
+            sans: ['"Inter"', 'system-ui', '-apple-system', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+    @keyframes ping-ring { 0%{transform:scale(1);opacity:.5} 100%{transform:scale(2.8);opacity:0} }
+    @keyframes spin { to{transform:rotate(360deg)} }
+    .blink { animation: blink 2s ease-in-out infinite; }
+    .ping-ring { animation: ping-ring 2s ease-out infinite; }
+    .spin { animation: spin 0.8s linear infinite; }
+    * { scrollbar-width: thin; scrollbar-color: #25252d #0f0f12; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #25252d; border-radius: 2px; }
+    body { margin:0; overflow:hidden; }
+    input::placeholder { color: #52525e; }
+  </style>
+</head>
+<body class="bg-base-950">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ── Static Data ───────────────────────────────────────── */
+const activeRobots = [
+  { id:1, name:'Robot 1', task:'Debris removal', bat:64 },
+  { id:2, name:'Robot 2', task:'Area scan', bat:81 },
+  { id:3, name:'Robot 3', task:'Perimeter', bat:73 },
+  { id:4, name:'Robot 4', task:'Comms relay', bat:90 },
+];
+const reserveRobots = [
+  { id:6, name:'Robot 6' },
+  { id:7, name:'Robot 7' },
+];
+
+/* ── Floor plan data ───────────────────────────────────── */
+const rooms = [
+  { id:'pump',  label:'PUMP RM',      x:0,   y:0,   w:155, h:125, c:'#2a3a3a' },
+  { id:'cold',  label:'COLD RM',      x:165, y:0,   w:135, h:125, c:'#2a2a3a' },
+  { id:'store', label:'STORAGE',      x:310, y:0,   w:130, h:125, c:'#2a3328' },
+  { id:'mech',  label:'MECH RM',      x:450, y:0,   w:150, h:125, c:'#302a3a' },
+  { id:'corr',  label:'MAIN CORRIDOR',x:0,   y:135, w:600, h:55,  c:'#2d2d22' },
+  { id:'west',  label:'WEST CELL',    x:0,   y:200, w:135, h:115, c:'#3a2a2a' },
+  { id:'tun',   label:'TUNNELS',      x:145, y:200, w:155, h:115, c:'#1e2a3a' },
+  { id:'east',  label:'EAST CELL',    x:310, y:200, w:135, h:115, c:'#3a3525' },
+  { id:'ctrl',  label:'CONTROL RM',   x:455, y:200, w:145, h:115, c:'#1e3535' },
+];
+const doorSlots = [
+  {x:55,y:125,w:28,h:10},{x:215,y:125,w:28,h:10},{x:360,y:125,w:28,h:10},{x:505,y:125,w:28,h:10},
+  {x:50,y:190,w:28,h:10},{x:200,y:190,w:28,h:10},{x:360,y:190,w:28,h:10},{x:510,y:190,w:28,h:10},
+  {x:-3,y:150,w:6,h:26},{x:597,y:150,w:6,h:26},{x:210,y:311,w:28,h:6},{x:510,y:311,w:28,h:6},
+];
+const exitLabels = [
+  {x:-12,y:163,label:'SEWAGE EXIT',a:'end'},
+  {x:612,y:163,label:'FUSEBOX EXIT',a:'start'},
+  {x:224,y:330,label:'OVERGROWN EXIT',a:'middle'},
+  {x:524,y:330,label:'SERVICE EXIT',a:'middle'},
+];
+const robotXY = {x:255,y:162};
+const victimXY = {x:68,y:58};
+
+/* ── Utility ───────────────────────────────────────────── */
+const pad = n => String(n).padStart(2,'0');
+const fmtTime = s => `${pad(Math.floor(s/3600))}:${pad(Math.floor((s%3600)/60))}:${pad(s%60)}`;
+const now_t = () => { const d=new Date(); return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes()); };
+
+/* ── OpenAI call ───────────────────────────────────────── */
+async function analyzeInjuries(apiKey, victimText, chatHistory) {
+  const historyContext = chatHistory
+    .filter(m => m.type === 'v' || m.type === 'h')
+    .map(m => `${m.type === 'v' ? 'Victim' : 'Robot'}: ${m.text}`)
+    .join('\n');
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      temperature: 0.3,
+      messages: [
+        { role: 'system', content: `You are a medical triage AI for a disaster rescue operation. A robot has found a victim and is relaying their messages. Based on the victim's description, provide a medical assessment.
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "injuryReport": "Describe the injuries identified based on the victim's description. Be specific about body parts, type of injury, and severity. Clinical tone, 2-4 sentences.",
+  "medicalAttention": ["supply or action 1", "supply or action 2", "supply or action 3"],
+  "severity": "CRITICAL" or "MODERATE" or "MINOR",
+  "followUp": "A short follow-up question or instruction to relay to the victim"
+}` },
+        { role: 'user', content: `Conversation so far:\n${historyContext}\n\nLatest from victim: "${victimText}"\n\nProvide medical triage assessment as JSON.` }
+      ]
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `API error ${res.status}`);
+  }
+
+  const data = await res.json();
+  const content = data.choices[0].message.content;
+  // Strip markdown code fences if present
+  const cleaned = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  return JSON.parse(cleaned);
+}
+
+/* ================================================================
+   COMPONENTS
+================================================================ */
+
+/* ── API Key Modal ─────────────────────────────────────── */
+function ApiKeyModal({ onSave }) {
+  const [key, setKey] = useState('');
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
+      <div className="bg-base-800 border border-base-600 rounded-lg p-6 w-[420px]">
+        <div className="text-[11px] font-mono uppercase tracking-widest text-base-400 mb-1">Configuration Required</div>
+        <div className="text-[13px] text-base-200 mb-4">Enter your OpenAI API key. It will be stored locally in your browser only.</div>
+        <input
+          className="w-full bg-base-950 border border-base-600 rounded px-3 py-2 text-[12px] text-base-200 font-mono outline-none focus:border-base-400 mb-3"
+          placeholder="sk-proj-..."
+          type="password"
+          value={key}
+          onChange={e => setKey(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && key.trim() && onSave(key.trim())}
+        />
+        <button
+          onClick={() => key.trim() && onSave(key.trim())}
+          className="w-full bg-base-700 hover:bg-base-600 text-base-200 text-[11px] font-medium font-mono py-2 rounded transition-colors">
+          CONNECT
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Header ────────────────────────────────────────────── */
+function Header() {
+  const [clk, setClk] = useState('');
+  const [el, setEl] = useState(6443);
+  useEffect(() => { const t=()=>setClk(new Date().toUTCString().split(' ')[4]+'Z'); t(); const i=setInterval(t,1000); return()=>clearInterval(i); }, []);
+  useEffect(() => { const i=setInterval(()=>setEl(e=>e+1),1000); return()=>clearInterval(i); }, []);
+
+  return (
+    <header className="h-10 bg-base-900 border-b border-base-700 flex items-center justify-between px-4 shrink-0 font-mono">
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] font-semibold tracking-wider text-base-200">ADAM-OPS</span>
+      </div>
+      <div className="flex items-center gap-5 text-[10px] text-base-400 tracking-wide">
+        <span>{clk}</span>
+        <span>T+ <span className="text-base-200">{fmtTime(el)}</span></span>
+      </div>
+    </header>
+  );
+}
+
+/* ── Chat ───────────────────────────────────────────────── */
+function Chat({ msgs, onSend, loading }) {
+  const [inp, setInp] = useState('');
+  const ref = useRef(null);
+  useEffect(() => { ref.current && (ref.current.scrollTop = ref.current.scrollHeight); }, [msgs]);
+
+  const send = () => {
+    const t = inp.trim(); if (!t || loading) return;
+    onSend(t);
+    setInp('');
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-base-900 border border-base-700 rounded overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-base-700 flex items-center justify-between shrink-0">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-base-400 font-mono">Comms</span>
+        <span className="text-[9px] text-emerald-500/70 font-mono tracking-wide">RELAY ON</span>
+      </div>
+      <div ref={ref} className="flex-1 overflow-y-auto px-3 py-2 flex flex-col gap-1.5 min-h-0">
+        {msgs.map(m => (
+          <div key={m.id} className={`flex flex-col ${m.type==='h'?'items-end':m.type==='sys'?'items-center':'items-start'}`}>
+            {m.type==='sys' ? (
+              <span className="text-[10px] text-base-500 font-mono py-0.5">{m.text}</span>
+            ) : (
+              <>
+                <span className="text-[9px] font-mono tracking-wide mb-0.5 text-base-500">
+                  {m.type==='v'?'VICTIM':'ROBOT 1'} {m.t}
+                </span>
+                <div className={`max-w-[88%] px-2.5 py-1.5 text-[12px] leading-snug rounded ${
+                  m.type==='v'
+                    ? 'bg-base-800 border border-base-700 text-base-200'
+                    : 'bg-base-750 border border-base-600 text-base-200'
+                }`}>{m.text}</div>
+              </>
+            )}
+          </div>
+        ))}
+        {loading && (
+          <div className="flex items-center gap-2 py-1">
+            <div className="w-3 h-3 border border-base-500 border-t-base-200 rounded-full spin"></div>
+            <span className="text-[10px] text-base-500 font-mono">Analyzing...</span>
+          </div>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-1 px-2 pt-2 border-t border-base-700 shrink-0">
+        {['Are you hurt?', 'Can you move?', 'Help is on the way', 'Stay calm', 'Where are you?'].map(q => (
+          <button key={q} onClick={() => !loading && onSend(q)} disabled={loading}
+            className="text-[10px] font-mono px-2 py-1 rounded border border-base-600 bg-base-800 text-base-300 hover:bg-base-700 hover:text-base-100 disabled:opacity-40 transition-colors">
+            {q}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-1.5 p-2 shrink-0">
+        <input
+          className="flex-1 bg-base-950 border border-base-700 rounded px-2.5 py-1.5 text-[12px] text-base-200 outline-none focus:border-base-500 transition-colors font-sans"
+          placeholder="Describe your injuries..."
+          value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()}
+          disabled={loading}
+        />
+        <button onClick={send} disabled={loading}
+          className="bg-base-700 hover:bg-base-600 disabled:opacity-40 transition-colors text-base-300 px-3 rounded text-[11px] font-medium">
+          SEND
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Floor Plan ─────────────────────────────────────────── */
+function FloorPlan() {
+  return (
+    <div className="flex flex-col h-full bg-base-900 border border-base-700 rounded overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-base-700 flex items-center justify-between shrink-0">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-base-400 font-mono">Emergency Response Map</span>
+        <div className="flex items-center gap-3 text-[9px] font-mono text-base-500">
+          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-400/60"></span>Robot</span>
+          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-400/60"></span>Victim</span>
+        </div>
+      </div>
+      <div className="flex-1 flex items-center justify-center p-3 overflow-hidden">
+        <svg viewBox="-70 -25 745 385" className="w-full h-full" style={{maxHeight:'100%'}}>
+          <defs>
+            <pattern id="g" width="16" height="16" patternUnits="userSpaceOnUse">
+              <path d="M16 0L0 0 0 16" fill="none" stroke="#1a1a20" strokeWidth="0.4"/>
+            </pattern>
+          </defs>
+          <rect x="-70" y="-25" width="745" height="385" fill="#0c0c10"/>
+          <rect x="-70" y="-25" width="745" height="385" fill="url(#g)"/>
+          <rect x="-2" y="-2" width="604" height="320" rx="2" fill="none" stroke="#2a2a33" strokeWidth="1"/>
+          {rooms.map(r=>(
+            <g key={r.id}>
+              <rect x={r.x} y={r.y} width={r.w} height={r.h} rx="1" fill={r.c} stroke="#3a3a44" strokeWidth="0.8"/>
+              <text x={r.x+r.w/2} y={r.y+r.h/2} textAnchor="middle" dominantBaseline="central"
+                    fill="#666" style={{fontSize:'10px',fontWeight:600,fontFamily:'JetBrains Mono,monospace',letterSpacing:'1px'}}>
+                {r.label}
+              </text>
+            </g>
+          ))}
+          {doorSlots.map((d,i)=>(
+            <rect key={i} x={d.x} y={d.y} width={d.w} height={d.h} rx="1" fill="#1a1a20" stroke="#333" strokeWidth="0.5"/>
+          ))}
+          {exitLabels.map((e,i)=>(
+            <text key={i} x={e.x} y={e.y} textAnchor={e.a} fill="#444"
+                  style={{fontSize:'8px',fontWeight:500,fontFamily:'JetBrains Mono,monospace',letterSpacing:'1px'}}>
+              {e.label}
+            </text>
+          ))}
+          <path d={`M${robotXY.x},${robotXY.y} L155,${robotXY.y} L80,${robotXY.y} L80,125 L${victimXY.x},125 L${victimXY.x},${victimXY.y}`}
+                fill="none" stroke="#3b82f6" strokeWidth="1" strokeDasharray="4,3" opacity="0.3"/>
+          <circle cx={victimXY.x} cy={victimXY.y} r="7" fill="none" stroke="#ef4444" strokeWidth="0.8" opacity="0.3" className="ping-ring"
+                  style={{transformOrigin:`${victimXY.x}px ${victimXY.y}px`}}/>
+          <circle cx={victimXY.x} cy={victimXY.y} r="3.5" fill="#ef4444" opacity="0.7"/>
+          <text x={victimXY.x} y={victimXY.y-10} textAnchor="middle" fill="#ef4444"
+                style={{fontSize:'7px',fontWeight:600,fontFamily:'JetBrains Mono,monospace',opacity:0.7}}>VIC</text>
+          <circle cx={robotXY.x} cy={robotXY.y} r="7" fill="none" stroke="#3b82f6" strokeWidth="0.8" opacity="0.2" className="ping-ring"
+                  style={{transformOrigin:`${robotXY.x}px ${robotXY.y}px`}}/>
+          <rect x={robotXY.x-6} y={robotXY.y-5} width="12" height="10" rx="2" fill="#3b82f6" opacity="0.6" stroke="#6ba3f7" strokeWidth="0.5"/>
+          <circle cx={robotXY.x-2.5} cy={robotXY.y+0.5} r="1.5" fill="#fff" opacity="0.5"/>
+          <circle cx={robotXY.x+2.5} cy={robotXY.y+0.5} r="1.5" fill="#fff" opacity="0.5"/>
+          <text x={robotXY.x} y={robotXY.y-11} textAnchor="middle" fill="#3b82f6"
+                style={{fontSize:'7px',fontWeight:600,fontFamily:'JetBrains Mono,monospace',opacity:0.6}}>R-01</text>
+          <line x1="480" y1="340" x2="560" y2="340" stroke="#333" strokeWidth="0.5"/>
+          <text x="520" y="350" textAnchor="middle" fill="#444"
+                style={{fontSize:'7px',fontFamily:'JetBrains Mono,monospace'}}>10m</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+/* ── Robot List ─────────────────────────────────────────── */
+function Robots() {
+  const [sel, setSel] = useState(1);
+  return (
+    <div className="flex flex-col h-full bg-base-900 border border-base-700 rounded overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-base-700 shrink-0">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-base-400 font-mono">Units</span>
+      </div>
+      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
+        <div className="text-[9px] uppercase tracking-widest text-base-500 font-mono px-1 mb-0.5">Active</div>
+        {activeRobots.map(r=>(
+          <button key={r.id} onClick={()=>setSel(r.id)}
+            className={`w-full text-left px-2.5 py-2 rounded border transition-all text-[11px] ${
+              sel===r.id ? 'bg-base-800 border-base-600 text-base-100' : 'bg-transparent border-transparent text-base-300 hover:bg-base-850'
+            }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/70"></span>
+                <span className="font-mono font-medium">{r.name}</span>
+              </div>
+              <span className="font-mono text-[10px] text-base-500">{r.bat}%</span>
+            </div>
+            <div className="text-[10px] text-base-500 ml-3.5 font-mono">{r.task}</div>
+          </button>
+        ))}
+        <div className="text-[9px] uppercase tracking-widest text-base-500 font-mono px-1 mt-2 mb-0.5">Reserve</div>
+        {reserveRobots.map(r=>(
+          <button key={r.id} onClick={()=>setSel(r.id)}
+            className={`w-full text-left px-2.5 py-2 rounded border transition-all text-[11px] ${
+              sel===r.id ? 'bg-base-800 border-base-600 text-base-100' : 'bg-transparent border-transparent text-base-400 hover:bg-base-850'
+            }`}>
+            <div className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-base-500"></span>
+              <span className="font-mono">{r.name}</span>
+              <span className="text-[9px] text-base-500 font-mono ml-auto">STBY</span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── ETA ────────────────────────────────────────────────── */
+function ETA() {
+  const [s, setS] = useState(720);
+  useEffect(()=>{ const i=setInterval(()=>setS(e=>Math.max(0,e-1)),1000); return()=>clearInterval(i); },[]);
+  const m=Math.floor(s/60), sec=pad(s%60);
+
+  return (
+    <div className="bg-base-900 border border-base-700 rounded p-3 h-full flex flex-col items-center justify-center font-mono">
+      <div className="text-[9px] uppercase tracking-widest text-base-500 mb-2">ETA</div>
+      <div className="text-3xl font-bold text-base-100 tracking-tight">{m}:{sec}</div>
+    </div>
+  );
+}
+
+/* ── Injury Report ──────────────────────────────────────── */
+function InjuryReport({ medical }) {
+  const sevColor = {
+    'CRITICAL': 'bg-red-500/10 text-red-400/80 border-red-500/20',
+    'MODERATE': 'bg-amber-500/10 text-amber-400/80 border-amber-500/20',
+    'MINOR':    'bg-emerald-500/10 text-emerald-400/80 border-emerald-500/20',
+  };
+
+  return (
+    <div className="bg-base-900 border border-base-700 rounded p-3 h-full flex flex-col font-mono overflow-hidden">
+      <div className="flex items-center justify-between mb-2 shrink-0">
+        <span className="text-[9px] uppercase tracking-widest text-base-500">Injury Report</span>
+        {medical && (
+          <span className={`text-[9px] font-semibold tracking-wider px-2 py-0.5 rounded border ${sevColor[medical.severity] || sevColor['MODERATE']}`}>
+            {medical.severity}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {medical
+          ? <div className="text-[11px] text-base-200 leading-relaxed">{medical.injuryReport}</div>
+          : <div className="text-[11px] text-base-500 italic">Awaiting victim report...</div>
+        }
+      </div>
+    </div>
+  );
+}
+
+/* ── Medical Attention ─────────────────────────────────── */
+function MedicalAttention({ medical }) {
+  return (
+    <div className="bg-base-900 border border-base-700 rounded p-3 h-full flex flex-col font-mono overflow-hidden">
+      <div className="px-0 py-0 mb-2 shrink-0">
+        <span className="text-[9px] uppercase tracking-widest text-base-500">Medical Attention Needed</span>
+      </div>
+      <div className="flex-1 overflow-y-auto flex flex-col gap-1">
+        {medical
+          ? medical.medicalAttention.map((item, i) => (
+              <div key={i} className="flex items-start gap-2 text-[11px]">
+                <span className="text-base-500 mt-px">-</span>
+                <span className="text-base-200">{item}</span>
+              </div>
+            ))
+          : <div className="text-[11px] text-base-500 italic">Awaiting victim report...</div>
+        }
+      </div>
+    </div>
+  );
+}
+
+/* ── App ────────────────────────────────────────────────── */
+function App() {
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_key') || '');
+  const [showKeyModal, setShowKeyModal] = useState(!apiKey);
+  const [msgs, setMsgs] = useState([
+    { id: 1, type: 'sys', text: 'VICTIM DETECTED' },
+    { id: 2, type: 'h', text: 'Help is on the way. What injuries do you have?', t: now_t() },
+  ]);
+  const [medical, setMedical] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const saveKey = (key) => {
+    localStorage.setItem('openai_key', key);
+    setApiKey(key);
+    setShowKeyModal(false);
+  };
+
+  const handleSend = useCallback(async (text) => {
+    const time = now_t();
+
+    // Add victim message
+    setMsgs(p => [...p, { id: Date.now(), type: 'v', text, t: time }]);
+    setLoading(true);
+
+    try {
+      // Get current messages for context (including the new one)
+      const allMsgs = [...msgs, { id: Date.now(), type: 'v', text, t: time }];
+      const result = await analyzeInjuries(apiKey, text, allMsgs);
+
+      setMedical(result);
+
+      // Robot relays the follow-up question
+      if (result.followUp) {
+        setMsgs(p => [
+          ...p,
+          { id: Date.now() + 1, type: 'sys', text: 'Medical analysis updated' },
+          { id: Date.now() + 2, type: 'h', text: result.followUp, t: now_t() },
+        ]);
+      } else {
+        setMsgs(p => [...p, { id: Date.now() + 1, type: 'sys', text: 'Medical analysis updated' }]);
+      }
+    } catch (err) {
+      setMsgs(p => [...p, { id: Date.now() + 1, type: 'sys', text: `Error: ${err.message}` }]);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiKey, msgs]);
+
+  return (
+    <div className="h-screen flex flex-col bg-base-950 text-base-200 font-sans">
+      {showKeyModal && <ApiKeyModal onSave={saveKey} />}
+      <Header />
+      <main className="flex-1 grid grid-cols-[260px_1fr_200px] grid-rows-[1fr_160px] gap-1.5 p-1.5 overflow-hidden min-h-0">
+        <div className="row-span-2 min-h-0"><Chat msgs={msgs} onSend={handleSend} loading={loading} /></div>
+        <div className="min-h-0"><FloorPlan /></div>
+        <div className="row-span-2 min-h-0"><Robots /></div>
+        <div className="grid grid-cols-[140px_1fr_1fr] gap-1.5 min-h-0">
+          <ETA />
+          <InjuryReport medical={medical} />
+          <MedicalAttention medical={medical} />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
