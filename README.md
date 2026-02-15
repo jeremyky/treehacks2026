@@ -10,17 +10,47 @@ A full-stack autonomous search and rescue system using a Booster K1 humanoid rob
 
 ## Table of Contents
 
-1. [System Overview](#system-overview)
-2. [Architecture](#architecture)
-3. [Pipelines](#pipelines)
-4. [Setup & Installation](#setup--installation)
-5. [Running the System](#running-the-system)
-6. [How It All Works](#how-it-all-works)
-7. [Development Guide](#development-guide)
+1. [System Overview](#1-system-overview)
+   - 1.1 [Key Features](#key-features)
+   - 1.2 [Screenshots](#screenshots)
+2. [Architecture](#2-architecture)
+   - 2.1 [High-Level System Diagram](#21-high-level-system-diagram)
+   - 2.2 [Module Structure](#22-module-structure)
+3. [Pipelines](#3-pipelines)
+   - 3.1 [LLM Decision-Making Pipeline](#31-llm-decision-making-pipeline)
+   - 3.2 [VLM (Vision Language Model) Pipeline](#32-vlm-vision-language-model-pipeline)
+   - 3.3 [LLM Medical Diagnosis Pipeline](#33-llm-medical-diagnosis-pipeline)
+   - 3.4 [Search and Rescue Pipeline](#34-search-and-rescue-pipeline)
+   - 3.5 [K1 Communication Pipeline (Robot Bridge)](#35-k1-communication-pipeline-robot-bridge)
+   - 3.6 [Backend + Frontend](#36-backend--frontend)
+   - 3.7 [K1 Robot & Keyframes](#37-k1-robot--keyframes)
+   - 3.8 [Intelligence & World Building](#38-intelligence--world-building)
+4. [Setup & Installation](#4-setup--installation)
+   - 4.1 [Prerequisites](#41-prerequisites)
+   - 4.2 [Installation Steps](#42-installation-steps)
+5. [Running the System](#5-running-the-system)
+   - 5.1 [Mode A: Local (Webcam)](#51-mode-a-local-webcam--3-terminals)
+   - 5.2 [Mode B: Robot (Booster K1)](#52-mode-b-robot-booster-k1--4-terminals)
+   - 5.3 [Smoke Test (Robot Mode)](#53-smoke-test-robot-mode)
+6. [How It All Works](#6-how-it-all-works)
+   - 6.1 [End-to-End Flow (Typical Mission)](#61-end-to-end-flow-typical-mission)
+   - 6.2 [Data Flows](#62-data-flows)
+7. [Development Guide](#7-development-guide)
+   - 7.1 [Project Structure Philosophy](#71-project-structure-philosophy)
+   - 7.2 [Key Design Decisions](#72-key-design-decisions)
+   - 7.3 [Adding a New Phase](#73-adding-a-new-phase)
+   - 7.4 [Adding a New Perception Model](#74-adding-a-new-perception-model)
+   - 7.5 [Adding a New LLM Provider](#75-adding-a-new-llm-provider)
+   - 7.6 [Testing](#76-testing)
+   - 7.7 [Troubleshooting](#77-troubleshooting)
+   - 7.8 [Performance Notes](#78-performance-notes)
+   - 7.9 [Cost Estimates (OpenAI API)](#79-cost-estimates-openai-api)
+8. [Limitations](#8-limitations)
+9. [Credits](#credits)
 
 ---
 
-## System Overview
+## 1. System Overview
 
 This project implements an autonomous humanoid robot for search and rescue operations. The robot can:
 
@@ -38,11 +68,25 @@ This project implements an autonomous humanoid robot for search and rescue opera
 - **Real-Time Command Center**: React webapp with live video feed, comms log, floor plan, operator messaging
 - **Keyframe System**: Event-triggered frame capture (not continuous recording) for efficient storage and transmission
 
+### Screenshots
+
+| [Landing page](https://www.adamrobotics.xyz/) | Operator dashboard |
+|-----------------------------------------------|--------------------|
+| ![Landing page](example-landing-page.png)      | ![Operator dashboard](example-dashboard.png) |
+
+| YOLO-World debris detection | Generated medical report |
+|-----------------------------|---------------------------|
+| ![Debris detection](example-debris.png)       | ![Medical report](example-doc.png) |
+
+**End-to-end flow (building intuition):**
+
+![Full mission flow](example-final-usage.png)
+
 ---
 
-## Architecture
+## 2. Architecture
 
-### High-Level System Diagram
+### 2.1 High-Level System Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -113,7 +157,7 @@ This project implements an autonomous humanoid robot for search and rescue opera
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Module Structure
+### 2.2 Module Structure
 
 ```
 treehacks2026/
@@ -193,9 +237,9 @@ treehacks2026/
 
 ---
 
-## Pipelines
+## 3. Pipelines
 
-### 1. LLM Decision-Making Pipeline
+### 3.1 LLM Decision-Making Pipeline
 
 **Goal**: High-level autonomous decision making for navigation, dialogue, and phase transitions.
 
@@ -250,7 +294,7 @@ treehacks2026/
 
 ---
 
-### 2. VLM (Vision Language Model) Pipeline
+### 3.2 VLM (Vision Language Model) Pipeline
 
 **Goal**: Detect injuries from camera frames using multimodal vision-language models.
 
@@ -308,7 +352,7 @@ Findings → TriagePipeline → Evidence collector → Report builder
 
 ---
 
-### 3. LLM Medical Diagnosis Pipeline
+### 3.3 LLM Medical Diagnosis Pipeline
 
 **Goal**: Structured medical triage through dialogue + visual assessment.
 
@@ -392,7 +436,7 @@ Findings → TriagePipeline → Evidence collector → Report builder
 
 ---
 
-### 4. Search and Rescue Pipeline
+### 3.4 Search and Rescue Pipeline
 
 **Goal**: Autonomous search for victims in unknown environment, guided by audio cues.
 
@@ -400,13 +444,7 @@ Findings → TriagePipeline → Evidence collector → Report builder
 
 #### Phase 1: SEARCH_LOCALIZE
 - Robot patrols/rotates, calling out: "Where are you? Can you hear me?"
-- **Audio Scanner** listens for voice responses:
-  - Records 3-second windows
-  - Runs speech recognition (Whisper API)
-  - If speech detected → runs direction-finding algorithm:
-    - Compares audio energy across stereo channels
-    - Estimates bearing (angle) to sound source
-    - Returns: `(bearing_degrees, confidence)`
+- **Audio Scanner** listens for voice responses and localizes sound direction (see [Sound-based localization](#sound-based-localization) below).
 - **Person Detector** (YOLO) scans video for humans
 - **Exit Condition**: Person detected with confidence ≥ 0.7 OR audio response heard
 
@@ -447,9 +485,23 @@ announce → listen (3s) → ASR
 - `himpublic-py/src/himpublic/perception/person_detector.py`
 - `himpublic-py/src/himpublic/perception/openvocab.py`
 
+#### Sound-based localization
+
+We localize the victim by **spin-to-peak loudness**, not by stereo microphone array:
+
+1. **Call out** — Robot announces ("Is anyone there? Can you hear me?") and waits for a response.
+2. **360° scan** — Robot rotates in fixed steps (e.g. 30°). At each heading it records a short audio window (~0.4 s), then turns to the next angle until a full rotation is done.
+3. **Per-window signal** — For each window we compute **RMS** (root-mean-square energy) and **VAD** (voice activity detection via webrtcvad or energy threshold). A composite score combines loudness and voice likelihood.
+4. **Best bearing** — Scores are smoothed over adjacent angles (to reduce spikes), then the heading with the highest score is chosen as the estimated bearing to the sound source. Confidence is derived from how much that peak stands out above the mean.
+5. **Navigate** — Robot rotates toward the chosen bearing and walks forward; YOLO person detection then refines approach.
+
+So localization is **directional hearing by physical rotation**: we infer "sound came from that way" by which orientation had the loudest voice-like audio. No stereo phase or time-difference math—just turn, listen, and pick the loudest direction.
+
+**Located In**: `himpublic-py/src/himpublic/perception/audio_scanner.py`
+
 ---
 
-### 5. K1 Communication Pipeline (Robot Bridge)
+### 3.5 K1 Communication Pipeline (Robot Bridge)
 
 **Goal**: Abstract all robot hardware (camera, mic, speaker, motion) behind HTTP endpoints. Laptop orchestrator has ZERO ROS2 dependencies.
 
@@ -579,7 +631,7 @@ source /opt/ros/humble/setup.bash && python3 ~/server.py
 
 ---
 
-### 6. Backend + Frontend
+### 3.6 Backend + Frontend
 
 #### Backend (Command Center — FastAPI)
 
@@ -692,7 +744,7 @@ export default defineConfig({
 
 ---
 
-### 7. K1 Robot & Keyframes
+### 3.7 K1 Robot & Keyframes
 
 #### Hardware Specs
 - **Model**: Booster K1 Humanoid
@@ -770,7 +822,7 @@ export default defineConfig({
 
 ---
 
-### 8. Intelligence & World Building
+### 3.8 Intelligence & World Building
 
 #### World State Representation
 
@@ -882,9 +934,9 @@ DONE
 
 ---
 
-## Setup & Installation
+## 4. Setup & Installation
 
-### Prerequisites
+### 4.1 Prerequisites
 
 1. **Python 3.10+** (we use conda `base` environment)
 2. **Node.js 18+** (for webapp)
@@ -893,7 +945,7 @@ DONE
    - Webcam (for local mode)
    - Booster K1 robot (for robot mode)
 
-### Installation Steps
+### 4.2 Installation Steps
 
 #### 1. Clone Repository
 
@@ -944,9 +996,9 @@ scp himpublic-py/src/robot_bridge/server.py booster@192.168.10.102:~/server.py
 
 ---
 
-## Running the System
+## 5. Running the System
 
-### Mode A: Local (Webcam) — 3 Terminals
+### 5.1 Mode A: Local (Webcam) — 3 Terminals
 
 Use this for testing without the robot.
 
@@ -1004,7 +1056,7 @@ Open **http://localhost:5173** in browser.
 
 ---
 
-### Mode B: Robot (Booster K1) — 4 Terminals
+### 5.2 Mode B: Robot (Booster K1) — 4 Terminals
 
 Use this when SSH'd into the K1 robot.
 
@@ -1071,7 +1123,7 @@ Open **http://localhost:5173**
 
 ---
 
-### Smoke Test (Robot Mode)
+### 5.3 Smoke Test (Robot Mode)
 
 Before running the full pipeline, verify the bridge works:
 
@@ -1091,9 +1143,9 @@ python3 scripts/smoke_test_robot.py --host 192.168.10.102
 
 ---
 
-## How It All Works
+## 6. How It All Works
 
-### End-to-End Flow (Typical Mission)
+### 6.1 End-to-End Flow (Typical Mission)
 
 1. **Startup**:
    - Orchestrator connects to robot bridge (or webcam)
@@ -1157,7 +1209,7 @@ python3 scripts/smoke_test_robot.py --host 192.168.10.102
    - Robot polls GET /operator-messages, speaks them
    - Awaits handoff to human responders
 
-### Data Flows
+### 6.2 Data Flows
 
 #### Perception → Decision → Action
 
@@ -1228,16 +1280,16 @@ Command Center: clears operator_messages queue
 
 ---
 
-## Development Guide
+## 7. Development Guide
 
-### Project Structure Philosophy
+### 7.1 Project Structure Philosophy
 
 - **himpublic-py**: Production-style pipeline for real deployment
 - **no-robot-sim**: Wizard-of-Oz demo (keyboard-driven, no robot)
 - **webapp**: Operator dashboard (React)
 - **booster_robotics_sdk**: Official SDK reference (read-only)
 
-### Key Design Decisions
+### 7.2 Key Design Decisions
 
 1. **Python-Orchestrator-First** (not ROS-first):
    - Develop on laptop without ROS2
@@ -1264,7 +1316,7 @@ Command Center: clears operator_messages queue
    - Reproducible mission flow
    - Override only via `--force_phase` (logged)
 
-### Adding a New Phase
+### 7.3 Adding a New Phase
 
 1. **Define phase enum** (`himpublic-py/src/himpublic/orchestrator/phases.py`):
    ```python
@@ -1296,7 +1348,7 @@ Command Center: clears operator_messages queue
    )
    ```
 
-### Adding a New Perception Model
+### 7.4 Adding a New Perception Model
 
 1. **Create detector** (`himpublic-py/src/himpublic/perception/new_detector.py`):
    ```python
@@ -1317,7 +1369,7 @@ Command Center: clears operator_messages queue
    detections = new_detector.detect(frame)
    ```
 
-### Adding a New LLM Provider
+### 7.5 Adding a New LLM Provider
 
 1. **Create adapter** (`himpublic-py/src/himpublic/orchestrator/llm_adapters/new_provider.py`):
    ```python
@@ -1342,7 +1394,7 @@ Command Center: clears operator_messages queue
        response = call_new_provider(...)
    ```
 
-### Testing
+### 7.6 Testing
 
 #### Unit Tests
 ```bash
@@ -1380,7 +1432,7 @@ cd webapp && npm run dev
 # - Comms log shows robot speech
 ```
 
-### Troubleshooting
+### 7.7 Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
@@ -1392,15 +1444,19 @@ cd webapp && npm run dev
 | YOLO "model not found" | First run, downloading weights | Wait ~1 min, will auto-download yolov8n.pt |
 | LLM "API key not found" | Missing .env file | Create `himpublic-py/.env` with `OPENAI_API_KEY=...` |
 
-### Performance Notes
+### 7.8 Performance Notes
 
-- **LLM latency**: GPT-4o-mini typically 200-500ms per call
-- **VLM latency**: GPT-4-Vision typically 1-2s per frame
-- **YOLO inference**: ~30 FPS on laptop GPU, ~10 FPS on CPU
-- **YOLO-World**: ~15 FPS on GPU, ~5 FPS on CPU
-- **Keyframe transmission**: ~60 KB per frame at quality 80
+**Inference (orchestrator on laptop)**  
+- **LLM (GPT-4o-mini)**: ~200–500 ms per decision call; drives high-level policy at ~1 Hz.  
+- **VLM (GPT-4-Vision)**: ~1–2 s per frame for injury assessment; used for multi-view triage.  
+- **CV — YOLO (person)**: ~30 FPS on laptop GPU, ~10 FPS on CPU; runs every frame for search/approach.  
+- **CV — YOLO-World (open-vocab)**: ~15 FPS on GPU, ~5 FPS on CPU; used for rubble/obstacles.  
+- **Keyframe transmission**: ~60 KB per frame at quality 80.
 
-### Cost Estimates (OpenAI API)
+**Edge AI (K1 robot)**  
+The Booster K1 is built on a **Jetson Orin NX** (Tensor Cores GPU @ 1173 MHz, 117 TOPS). In our current setup the robot runs the **bridge** (camera, mic, speaker, motion) and heavy CV/LLM inference runs on the laptop. The K1’s on-board tensor GPUs support **on-edge inference**: running YOLO or other lightweight models directly on the robot would reduce latency and bandwidth and allow operation with intermittent connectivity. Our pipeline is structured so that perception and policy can be moved on-robot for future edge deployment.
+
+### 7.9 Cost Estimates (OpenAI API)
 
 - **LLM (GPT-4o-mini)**: $0.15 / 1M input tokens, $0.60 / 1M output tokens
   - ~500 tokens/decision → ~200 decisions/$1
@@ -1410,6 +1466,17 @@ cd webapp && npm run dev
   - 1 min dialogue = $0.006
 
 **Estimated cost per mission**: $0.10 - $0.50 (depending on dialogue length)
+
+---
+
+## 8. Limitations
+
+- **Voice-dependent search**: Sound-based localization assumes the victim can respond by voice. Silent or unresponsive victims are only found by visual search (YOLO) as the robot patrols.
+- **Environment**: Reverberant or very noisy spaces can degrade audio bearing accuracy; the spin-to-peak method works best when the victim’s voice clearly dominates in one direction.
+- **API latency**: LLM and VLM calls go to the cloud (OpenAI); round-trip latency (200 ms–2 s) affects how quickly the robot reacts. Edge deployment on the K1’s tensor GPUs would reduce this for CV.
+- **CV false positives/negatives**: YOLO can miss persons in clutter or at odd angles; YOLO-World rubble detection depends on prompt and lighting. Medical VLM findings are probabilistic and should be confirmed by medics.
+- **Single victim focus**: The current triage flow is optimized for one victim at a time; multi-victim prioritization is not fully implemented.
+- **Connectivity**: Orchestrator and command center assume a reliable link between laptop and robot (e.g. USB Ethernet). Offline or bandwidth-limited operation would require moving inference on-robot.
 
 ---
 
@@ -1426,3 +1493,9 @@ cd webapp && npm run dev
 ## License
 
 MIT
+
+---
+
+**GitHub repo description** (paste into the repo About / description, 350 char max):
+
+> Autonomous search-and-rescue with a Booster K1 humanoid: audio-guided victim localization, LLM + VLM medical triage, evidence-based reports, and a real-time operator dashboard. TreeHacks 2026.
