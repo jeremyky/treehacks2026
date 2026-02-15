@@ -86,6 +86,80 @@ def cc_report(report: dict):
     cc_post("/report", json=report)
 
 # ---------------------------
+# OPERATOR MESSAGE POLLING (for chat -> robot speech)
+# ---------------------------
+_operator_poll_stop = False
+_last_operator_index = -1
+
+def _operator_message_loop():
+    """Poll command center for operator messages and speak them."""
+    global _operator_poll_stop, _last_operator_index
+    
+    if not CC_URL:
+        return
+    
+    print("💬 Operator message listener started...")
+    
+    try:
+        import requests
+    except ImportError:
+        return
+    
+    while not _operator_poll_stop:
+        try:
+            resp = requests.get(f"{CC_URL}/operator-messages", timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                messages = data.get("messages", [])
+                
+                # Speak any new messages we haven't seen yet
+                for idx, msg in enumerate(messages):
+                    if idx > _last_operator_index:
+                        text = msg.get("text", "").strip()
+                        if text:
+                            print(f"\n💬 OPERATOR MESSAGE: {text}")
+                            # Speak WITHOUT calling cc_robot_said (already in comms from operator)
+                            print(f"🔊 {text}")
+                            if not NO_SPEECH:
+                                try:
+                                    subprocess.run(["espeak", text], 
+                                                 stdout=subprocess.DEVNULL, 
+                                                 stderr=subprocess.DEVNULL, 
+                                                 timeout=30)
+                                    time.sleep(0.5)
+                                except Exception:
+                                    pass
+                            _last_operator_index = idx
+                
+                # Acknowledge messages we've spoken
+                if _last_operator_index >= 0:
+                    try:
+                        requests.post(
+                            f"{CC_URL}/operator-messages/ack",
+                            json={"after_index": _last_operator_index},
+                            timeout=1
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        
+        time.sleep(1)  # Poll every second
+
+def start_operator_listener():
+    """Start background operator message polling thread."""
+    global _operator_poll_stop
+    _operator_poll_stop = False
+    t = threading.Thread(target=_operator_message_loop, daemon=True)
+    t.start()
+    print("💬 Operator message listener thread started")
+
+def stop_operator_listener():
+    """Stop operator message polling thread."""
+    global _operator_poll_stop
+    _operator_poll_stop = True
+
+# ---------------------------
 # OPTIMIZED CAMERA FEED
 # ---------------------------
 _camera_stop = False
@@ -328,6 +402,10 @@ def main():
 
     # Start camera feed FIRST (before user input)
     start_camera_feed()
+    
+    # Start operator message listener (for chat -> robot speech)
+    start_operator_listener()
+    
     time.sleep(2)  # Give camera 2s to initialize
     
     if not _camera_active:
@@ -337,6 +415,7 @@ def main():
         print("    bash robot_run.sh")
         print("")
 
+    print("💡 TIP: Type messages in the webapp chat and robot will speak them!")
     input("\nPress ENTER to start demo...\n")
 
     # ============================
@@ -414,15 +493,38 @@ def main():
           "Don't move it. I'll stay with you until the first responders come.",
           "DIAGNOSIS")
 
-    # Post a simple medical report to the web UI
+    # Post a simple medical report to the web UI (with document for command center display)
     if CC_URL:
+        incident_id = f"rescue_{int(time.time())}"
+        report_document = (
+            "# Incident Report\n\n"
+            "## Summary\n"
+            "Suspected right humerus fracture. Patient conscious and responsive. "
+            "Pain level reported. Debris cleared from patient.\n\n"
+            "## Findings\n"
+            "- Right arm injury (patient indicated); suspected humerus fracture.\n"
+            "- Patient responsive to verbal triage.\n"
+            "- Debris cleared from patient area.\n\n"
+            "## Recommendation\n"
+            "Immobilize right arm. Dispatch paramedics.\n\n"
+            "## Status\n"
+            "AWAITING_FIRST_RESPONDERS\n\n"
+            "*Triage support and documentation only — not a medical diagnosis.*"
+        )
         cc_report({
-            "incident_id": f"rescue_{int(time.time())}",
+            "incident_id": incident_id,
             "timestamp": time.time(),
             "findings": "Suspected right humerus fracture. Patient conscious and responsive. "
                         "Pain level reported. Debris cleared from patient.",
             "recommendation": "Immobilize right arm. Dispatch paramedics.",
             "status": "AWAITING_FIRST_RESPONDERS",
+            "document": report_document,
+            "patient_summary": {
+                "triage_priority": "MODERATE",
+                "injury_location": "right arm",
+                "bleeding": "no",
+                "pain_level": "reported",
+            },
         })
 
     # ============================
@@ -437,6 +539,7 @@ def main():
     stop(client)
 
     stop_camera_feed()
+    stop_operator_listener()
 
     print("\n" + "=" * 60)
     print("  DEMO COMPLETE")

@@ -127,6 +127,74 @@ def cc_post_snapshot(jpeg_bytes: bytes, meta: dict = None):
         pass
 
 # ═══════════════════════════════════════════════════════════════════
+#  OPERATOR MESSAGE POLLING (chat -> robot speech)
+# ═══════════════════════════════════════════════════════════════════
+_operator_poll_stop = False
+_last_operator_index = -1
+
+def operator_message_loop():
+    """Poll command center for operator messages and speak them."""
+    global _operator_poll_stop, _last_operator_index
+    
+    if not CC_URL:
+        return
+    
+    while not _operator_poll_stop:
+        try:
+            resp = http_requests.get(f"{CC_URL}/operator-messages", timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                messages = data.get("messages", [])
+                
+                # Speak any new messages we haven't seen yet
+                for idx, msg in enumerate(messages):
+                    if idx > _last_operator_index:
+                        text = msg.get("text", "").strip()
+                        if text:
+                            print(f"\n💬 OPERATOR MESSAGE: {text}")
+                            # Speak WITHOUT calling cc_robot_said (already in comms from operator)
+                            print(f"🔊 {text}")
+                            if not NO_SPEECH:
+                                try:
+                                    subprocess.run(["espeak", text], 
+                                                 stdout=subprocess.DEVNULL, 
+                                                 stderr=subprocess.DEVNULL, 
+                                                 timeout=30)
+                                    time.sleep(0.5)
+                                except FileNotFoundError:
+                                    print("  [espeak not found, skipping speech]")
+                                except Exception:
+                                    pass
+                            _last_operator_index = idx
+                
+                # Acknowledge messages we've spoken
+                if _last_operator_index >= 0:
+                    try:
+                        http_requests.post(
+                            f"{CC_URL}/operator-messages/ack",
+                            json={"after_index": _last_operator_index},
+                            timeout=1
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        
+        time.sleep(1)  # Poll every second
+
+def start_operator_listener():
+    """Start background operator message polling thread."""
+    global _operator_poll_stop
+    _operator_poll_stop = False
+    t = threading.Thread(target=operator_message_loop, daemon=True)
+    t.start()
+
+def stop_operator_listener():
+    """Stop operator message polling thread."""
+    global _operator_poll_stop
+    _operator_poll_stop = True
+
+# ═══════════════════════════════════════════════════════════════════
 #  BACKGROUND CAMERA FEED
 # ═══════════════════════════════════════════════════════════════════
 _camera_thread = None
@@ -375,9 +443,11 @@ def main():
     client.Init()
     print("Connected!\n")
 
-    # Start camera feed
+    # Start camera feed and operator listener
     start_camera_feed()
+    start_operator_listener()
 
+    print("\n💡 TIP: Type messages in the webapp chat and robot will speak them!\n")
     input("Press ENTER to start...\n")
 
     try:
@@ -750,6 +820,7 @@ def main():
         print(f"  Screenshots: {len(scan_image_paths)}")
         print("=" * 60)
         print("\n✓ Demo complete. Ctrl+C to exit.")
+        print("💬 Type in webapp chat to make robot speak!")
         
         while True:
             time.sleep(5)
@@ -757,10 +828,12 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping.")
         stop_camera_feed()
+        stop_operator_listener()
         stop(client)
     except Exception as e:
         print(f"\nError: {e}")
         stop_camera_feed()
+        stop_operator_listener()
         stop(client)
         raise
 

@@ -16,12 +16,33 @@ if str(_HIMPUBLIC_SRC) not in sys.path:
     sys.path.insert(0, str(_HIMPUBLIC_SRC))
 
 from himpublic.medical.triage_pipeline import TriagePipeline
+import cv2
+import numpy as np
 
 CC_URL = "http://localhost:8000"
 
 print("=" * 60)
 print("  TEST REPORT GENERATOR")
 print("=" * 60)
+print()
+
+# Create a dummy screenshot with "BLEEDING DETECTED" annotation
+print("📸 Creating test screenshot with bleeding detection...")
+test_img = np.ones((480, 640, 3), dtype=np.uint8) * 220  # Light gray background
+# Draw a red box (simulating bleeding)
+cv2.rectangle(test_img, (200, 150), (400, 350), (0, 0, 200), -1)  # Red filled rectangle
+cv2.rectangle(test_img, (200, 150), (400, 350), (0, 0, 255), 3)  # Red border
+cv2.putText(test_img, "BLEEDING DETECTED", (210, 130), 
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+cv2.putText(test_img, "Right Leg - Heavy Bleeding", (220, 240),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+# Save test screenshot
+evidence_dir = Path("reports/evidence")
+evidence_dir.mkdir(parents=True, exist_ok=True)
+test_screenshot = evidence_dir / f"test_bleeding_{int(time.time())}.jpg"
+cv2.imwrite(str(test_screenshot), test_img)
+print(f"✓ Test screenshot: {test_screenshot}")
 print()
 
 # Create demo triage data
@@ -76,7 +97,7 @@ report_path = pipeline.build_report(
         "Priority: HIGH (heavy bleeding + possible fracture)",
     ],
     conversation_transcript=conversation_transcript,
-    scene_images=[],
+    scene_images=[str(test_screenshot)],  # Include test screenshot
     meta={
         "demo": "test_report",
         "mechanism": "debris_collapse",

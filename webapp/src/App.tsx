@@ -8,7 +8,7 @@ import { InjuryReport } from './components/InjuryReport';
 // import { MedicalAttention } from './components/MedicalAttention';
 // import { RobotStatus } from './components/RobotStatus';
 import { fetchLatest, snapshotLatestUrl, postOperatorMessage } from './api/client';
-import type { CommsMessage, MedicalAssessment, LatestResponse, CommsEntry, IncidentReport } from './api/types';
+import type { CommsMessage, LatestResponse, CommsEntry, IncidentReport } from './api/types';
 import { nowT } from './utils/format';
 import DebugPage from './DebugPage';
 
@@ -101,22 +101,31 @@ function CommandCenterPage() {
     return { x: 325, y: 430 };
   }, [latest?.event?.robot_map_x, latest?.event?.robot_map_y]);
 
+  // Temporary demo report so document panel is always visible for judges (stays on screen)
+  const demoPlaceholderReport: IncidentReport = {
+    incident_id: '—',
+    received_at: new Date().toISOString(),
+    document: 'Awaiting incident report from robot.\n\nDocument will appear here after the robot completes:\n  • Navigation to victim\n  • Debris clear\n  • Triage questions\n  • Head/body scan\n  • Report generation\n\nThis panel stays visible so judges can see the final report.',
+  };
+
+  const reportForDoc = lastReport ?? demoPlaceholderReport;
+
   return (
     <div className="h-screen flex flex-col bg-base-950 text-base-200 font-sans">
       <Header />
-      <main className="flex-1 grid grid-cols-[260px_1fr_200px] grid-rows-[3fr_2fr] gap-1.5 p-1.5 overflow-hidden min-h-0">
+      <main className="flex-1 grid grid-cols-[260px_1fr_200px] grid-rows-[minmax(0,0.5fr)_1fr] gap-1.5 p-1.5 overflow-hidden min-h-0">
         <div className="row-span-2 min-h-0">
           <Chat msgs={msgs} onSend={handleSend} loading={loading} />
         </div>
-        <div className="min-h-0">
+        <div className="min-h-0 overflow-hidden">
           <FloorPlan robotXY={robotXY} />
         </div>
         <div className="row-span-2 min-h-0">
           <Robots />
         </div>
-        <div className="grid grid-cols-2 gap-1.5 min-h-0">
+        <div className="grid grid-cols-2 gap-1.5 min-h-0 overflow-hidden">
           <ETA snapshotUrl={snapshotUrl} />
-          <InjuryReport 
+          <InjuryReport
             medical={lastReport ? {
               injuryReport: `🩺 Priority: ${lastReport.patient_summary?.triage_priority || 'HIGH'}\n📍 Location: ${lastReport.patient_summary?.injury_location || 'right leg'}\n🩸 Bleeding: ${lastReport.patient_summary?.bleeding || 'yes'}\n😣 Pain: ${lastReport.patient_summary?.pain_level || '8'}/10`,
               severity: (lastReport.patient_summary?.triage_priority as any) || 'MODERATE',
@@ -125,6 +134,7 @@ function CommandCenterPage() {
             } : null}
             reportPath={lastReport?.report_path}
             pdfPath={lastReport?.pdf_path}
+            incidentReport={reportForDoc}
           />
         </div>
       </main>
