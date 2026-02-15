@@ -143,38 +143,67 @@ class LLMPolicy:
         has_person = num_persons >= 1
         _obs_conf = obs.confidence if obs else 0.5  # default for no-camera triage
 
-        # --- SEARCH_LOCALIZE: scan for rubble/debris, announce when found
+        # --- SEARCH_LOCALIZE: call out "Is anyone there?", listen, then scan; on voice or person → APPROACH
         if phase == Phase.SEARCH_LOCALIZE.value:
-            # If camera sees an object (rubble) with decent confidence → transition to DEBRIS_ASSESSMENT
+            # If camera sees someone/something with decent confidence → approach (identify where they are)
             if has_person and obs.confidence >= 0.3:
-                detected_name = obs.persons[0].cls_name if obs.persons else "debris"
+                detected_name = obs.persons[0].cls_name if obs.persons else "someone"
                 return Decision(
                     action=Action.SAY,
                     params={"search_sub_phase": "found"},
-                    say=f"I see rubble ahead. It looks like {detected_name}. Let me take a closer look.",
+                    say=f"I see {detected_name} ahead. Moving closer to confirm.",
                     wait_for_response_s=None,
-                    mode=Phase.DEBRIS_ASSESSMENT.value,
+                    mode=Phase.APPROACH_CONFIRM.value,
                     confidence=obs.confidence,
                 )
 
-            # Sub-phase state machine within SEARCH_LOCALIZE
             search_sub = conversation_state.get("search_sub_phase", "announce")
             now = float(conversation_state.get("now") or 0.0)
+            last_response = conversation_state.get("last_response")
+            last_asked_at = conversation_state.get("last_asked_at") or 0.0
 
-            # --- Sub-phase 1: "announce" – say "Scanning for rubble" out loud (once)
+            # --- Sub-phase 1: "announce" → call out "Is anyone there?" and listen (robot pipeline)
             if search_sub == "announce":
                 return Decision(
-                    action=Action.SAY,
-                    params={"search_sub_phase": "scanning"},
-                    say="Scanning the area for rubble and debris. Looking around now.",
-                    wait_for_response_s=None,
+                    action=Action.ASK,
+                    params={"search_sub_phase": "call_out_wait"},
+                    say="Is anyone there? Can you hear me?",
+                    wait_for_response_s=8.0,
                     mode=Phase.SEARCH_LOCALIZE.value,
                     confidence=0.5,
                 )
 
-            # --- Sub-phase 2: "scanning" – keep looking, periodically announce
+            # --- Sub-phase 2: "call_out_wait" – heard someone → run toward them (APPROACH); else timeout → scanning
+            if search_sub == "call_out_wait":
+                if last_response and last_response.strip():
+                    return Decision(
+                        action=Action.SAY,
+                        params={"search_sub_phase": "scanning", "clear_last_response": True},
+                        say="I heard you. Moving closer now.",
+                        wait_for_response_s=None,
+                        mode=Phase.APPROACH_CONFIRM.value,
+                        confidence=0.6,
+                    )
+                if last_asked_at and (now - last_asked_at) > 12.0:
+                    return Decision(
+                        action=Action.WAIT,
+                        params={"search_sub_phase": "scanning"},
+                        say=None,
+                        wait_for_response_s=None,
+                        mode=Phase.SEARCH_LOCALIZE.value,
+                        confidence=0.3,
+                    )
+                return Decision(
+                    action=Action.WAIT,
+                    params={"search_sub_phase": "call_out_wait"},
+                    say=None,
+                    wait_for_response_s=None,
+                    mode=Phase.SEARCH_LOCALIZE.value,
+                    confidence=0.3,
+                )
+
+            # --- Sub-phase 3: "scanning" – keep looking (vision-only after call-out)
             if search_sub == "scanning":
-                # Default: wait and keep scanning
                 return Decision(
                     action=Action.WAIT,
                     params={"search_sub_phase": "scanning"},
@@ -184,7 +213,6 @@ class LLMPolicy:
                     confidence=0.3,
                 )
 
-            # Fallback
             return Decision(
                 action=Action.WAIT,
                 params={"search_sub_phase": "scanning"},
@@ -282,8 +310,25 @@ class LLMPolicy:
                 confidence=obs.confidence,
             )
 
-        # --- INJURY_DETECTION: injury report. Exit: report complete → ASSIST_COMMUNICATE
+        # --- INJURY_DETECTION: run CV-based triage assessment then proceed.
+        # If the medical pipeline has significant findings, announce them before
+        # transitioning to ASSIST_COMMUNICATE for dialogue.
         if phase == Phase.INJURY_DETECTION.value:
+            medical_summary = conversation_state.get("_medical_findings_summary")
+            if medical_summary and medical_summary.get("significant_findings", 0) > 0:
+                n = medical_summary["significant_findings"]
+                say_text = (
+                    f"I've detected {n} possible injury indicator{'s' if n > 1 else ''}. "
+                    "I'm going to ask you some questions to help the medical team."
+                )
+                return Decision(
+                    action=Action.SAY,
+                    params={},
+                    say=say_text,
+                    wait_for_response_s=None,
+                    mode=Phase.ASSIST_COMMUNICATE.value,
+                    confidence=obs.confidence,
+                )
             return Decision(
                 action=Action.STOP,
                 params={},
@@ -313,7 +358,7 @@ class LLMPolicy:
             pending_retries = int(conversation_state.get("pending_question_retries", 0))
             current_key = conversation_state.get("current_question_key")
             now = float(conversation_state.get("now") or 0.0)
-            wait_window_s = 15.0
+            wait_window_s = 22.0  # longer so user has time to speak; mic listens up to 3 attempts + type-in fallback
 
             # Get or create the dialogue manager (stored on conversation_state by agent)
             dm: TriageDialogueManager | None = conversation_state.get("_dialogue_manager")
@@ -485,6 +530,7 @@ class LLMPolicy:
             images_captured = list(conversation_state.get("images_captured") or [])
             location_hint = getattr(obs, "scene_caption", None) or "unknown"
             incident_id = f"incident_{int(_t.time() * 1000)}"
+
             # Build a short document summary for the command center UI
             doc_lines = [
                 f"# Incident Report: {incident_id}",
@@ -498,10 +544,40 @@ class LLMPolicy:
                 "## Evidence",
                 f"- Images captured: {len(images_captured)}",
             ]
+
+            # Append medical triage findings if available (additive)
+            medical_summary = conversation_state.get("_medical_findings_summary")
+            suspected_injuries_list: list[dict] = []
+            if medical_summary and medical_summary.get("findings"):
+                doc_lines.extend([
+                    "",
+                    "## Triage Findings (CV-detected)",
+                    "",
+                    "| Finding | Region | Confidence | Severity |",
+                    "|---------|--------|------------|----------|",
+                ])
+                for mf in medical_summary["findings"]:
+                    doc_lines.append(
+                        f"| {mf.get('label', '—')} | {mf.get('region', '—')} "
+                        f"| {mf.get('confidence', 0):.2f} | {mf.get('severity', '—')} |"
+                    )
+                    suspected_injuries_list.append({
+                        "injury_type": mf.get("type", "unknown").replace("suspected_", ""),
+                        "body_location": mf.get("region", "unknown"),
+                        "severity_estimate": mf.get("severity", "low"),
+                        "confidence": mf.get("confidence", 0),
+                        "rationale": mf.get("label", ""),
+                    })
+                doc_lines.extend([
+                    "",
+                    "> *Triage support and documentation only — not a medical diagnosis.*",
+                ])
+
             report_payload = {
                 "incident_id": incident_id,
                 "timestamp": obs.timestamp if obs else 0,
                 "patient_summary": triage_answers,
+                "suspected_injuries": suspected_injuries_list,
                 "hazards": [],
                 "images": images_captured,
                 "location_hint": location_hint,

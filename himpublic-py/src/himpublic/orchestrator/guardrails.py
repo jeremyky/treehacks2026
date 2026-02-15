@@ -12,7 +12,7 @@ from himpublic.orchestrator.phases import Phase
 
 # Bounds for wait_for_response_s (seconds) — allow longer so victim has time to respond
 WAIT_FOR_RESPONSE_MIN = 0.0
-WAIT_FOR_RESPONSE_MAX = 18.0
+WAIT_FOR_RESPONSE_MAX = 25.0
 
 KNOWN_PHASES = frozenset(p.value for p in Phase)
 
@@ -23,7 +23,7 @@ def validate_llm_proposal(proposal: dict[str, Any] | None) -> dict[str, Any] | N
     construction, or None if invalid.
 
     - action must be in ALLOWED_ACTIONS
-    - wait_for_response_s clamped to [0, 18]; set to None if missing or invalid
+    - wait_for_response_s clamped to [0, 25]; set to None if missing or invalid
     - next_phase must be in KNOWN_PHASES (reject unknown)
     - confidence retained as-is (caller may threshold)
     """

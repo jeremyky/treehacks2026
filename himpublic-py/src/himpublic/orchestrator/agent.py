@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -31,6 +34,14 @@ from himpublic.perception.frame_store import LatestFrameStore, RingBuffer
 from himpublic.comms.command_center_client import CommandCenterClient
 from himpublic.orchestrator.dialogue_manager import TriageDialogueManager
 from himpublic.utils.event_logger import SearchEventLogger
+
+# Medical triage CV pipeline (additive integration)
+try:
+    from himpublic.medical.triage_pipeline import TriagePipeline as _TriagePipeline
+    _MEDICAL_AVAILABLE = True
+except ImportError:
+    _TriagePipeline = None  # type: ignore[misc, assignment]
+    _MEDICAL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +85,21 @@ def _log_triage(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _append_transcript(state: "SharedState", speaker: str, text: str) -> None:
+    """Append one transcript turn: 'HH:MM:SS | Speaker: text'."""
+    t = (text or "").strip()
+    if not t:
+        return
+    stamp = time.strftime("%H:%M:%S", time.localtime())
+    line = f"{stamp} | {speaker}: {t}"
+    buf = getattr(state, "conversation_transcript", None)
+    if isinstance(buf, list):
+        buf.append(line)
+        # Keep bounded to avoid unbounded memory growth in long sessions
+        if len(buf) > 500:
+            del buf[:-500]
+
+
 def _apply_decision_params(
     state: SharedState,
     decision: Decision,
@@ -112,6 +138,15 @@ def _apply_decision_params(
             if "consent_photos" in delta:
                 v = delta["consent_photos"]
                 state.consent_for_photos = bool(v) if isinstance(v, bool) else None
+            # Use victim's spoken body part for medical pipeline (CV does not infer body part)
+            if _MEDICAL_AVAILABLE:
+                spoken = (
+                    delta.get("injury_location")
+                    or delta.get("injury_location_detail")
+                    or delta.get("bleeding_location")
+                )
+                if spoken and getattr(state, "_medical_pipeline_ref", None) is not None:
+                    state._medical_pipeline_ref.set_spoken_body_region(str(spoken))
         _log_triage({"timestamp": now, "triage_answers": dict(state.triage_answers), "step_index": state.triage_step_index})
     if "current_question_key" in params:
         state.current_question_key = params["current_question_key"]
@@ -180,6 +215,49 @@ def _apply_decision_params(
             )
         _log_triage({"timestamp": now, "report_sent": state.report_sent, "report_payload": report_payload})
 
+    # Medical triage report generation (additive — triggers alongside existing report)
+    # Build report when we have CV findings OR triage answers (speech-first: victim Q&A still produces a report)
+    if params.get("send_report") and _MEDICAL_AVAILABLE:
+        _medical_pipeline = getattr(state, "_medical_pipeline_ref", None)
+        triage_answers = dict(getattr(state, "triage_answers", {}))
+        should_build = (
+            _medical_pipeline is not None
+            and (_medical_pipeline.has_significant_findings or triage_answers)
+        )
+        if should_build:
+            try:
+                # Use victim's spoken body part (e.g. "my knee") for report
+                spoken_region = (
+                    triage_answers.get("injury_location")
+                    or triage_answers.get("injury_location_detail")
+                    or triage_answers.get("bleeding_location")
+                )
+                if not spoken_region and isinstance(triage_answers.get("pain_locations"), list):
+                    pl = triage_answers["pain_locations"]
+                    spoken_region = pl[0] if pl else None
+                if spoken_region:
+                    _medical_pipeline.set_spoken_body_region(str(spoken_region))
+                transcript_lines = list(getattr(state, "conversation_transcript", []))
+                report_path = _medical_pipeline.build_report(
+                    scene_summary="Automated triage assessment by rescue robot.",
+                    victim_answers=triage_answers,
+                    notes=[
+                        "Generated during REPORT_SEND phase.",
+                        f"Transcript turns captured: {len(transcript_lines)}.",
+                    ],
+                    conversation_transcript=transcript_lines,
+                    meta={"session_id": params.get("report_payload", {}).get("incident_id", "")},
+                )
+                if report_path:
+                    logger.info("Medical triage report saved to %s", report_path)
+                    try:
+                        abs_path = str(Path(report_path).resolve())
+                        print(f"[Report saved] {abs_path}", flush=True)
+                    except Exception:
+                        print(f"[Report saved] {report_path}", flush=True)
+            except Exception as e:
+                logger.warning("Medical triage report generation failed: %s", e)
+
 
 def _format_decision_debug(
     phase: str,
@@ -241,6 +319,49 @@ VICTIM_MAP_X = 68
 VICTIM_MAP_Y = 58
 
 
+def _mic_level_thread(state: SharedState, stop_event: asyncio.Event) -> None:
+    """Background thread: read mic input and set state._mic_level (0.0–1.0) for the preview meter."""
+    import math
+    try:
+        import pyaudio
+    except ImportError:
+        return
+    CHUNK = 1024
+    RATE = 16000
+    FORMAT = pyaudio.paInt16
+    # Normalize: RMS above this maps to 1.0 (tune so normal speech fills the bar)
+    RMS_CAP = 2000.0
+    p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=FORMAT, channels=1, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    except Exception as e:
+        logger.debug("Mic level meter: could not open input stream: %s", e)
+        p.terminate()
+        return
+    try:
+        while not stop_event.is_set():
+            try:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                count = len(data) // 2
+                if count == 0:
+                    continue
+                samples = struct.unpack_from(f"{count}h", data)
+                rms = math.sqrt(sum(s * s for s in samples) / count)
+                level = min(1.0, rms / RMS_CAP)
+                state._mic_level = level
+            except Exception as e:
+                logger.debug("Mic level read: %s", e)
+                state._mic_level = 0.0
+            time.sleep(0.05)
+    finally:
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:
+            pass
+        p.terminate()
+
+
 @dataclass
 class SharedState:
     """State shared between agent tasks. Uses Phase for high-level mission phase."""
@@ -255,6 +376,7 @@ class SharedState:
     degraded_mode: bool = False  # e.g. no depth sensor
     last_response: str | None = None
     last_asked_at: float | None = None
+    last_speak_done: float = 0.0  # monotonic time when TTS finished (so audio_loop can wait 3s before listen)
     last_prompt: str | None = None  # last triage question/phrase we said
     person_found_emitted: bool = False
     wait_for_response_until: float | None = None
@@ -283,6 +405,10 @@ class SharedState:
     search_ask_retries: int = 0
     # Slot-based dialogue manager (persists across policy ticks)
     dialogue_manager: TriageDialogueManager | None = None
+    # Full transcript for report (robot + victim turns)
+    conversation_transcript: list[str] = field(default_factory=list)
+    # Mic level 0.0–1.0 for preview meter (updated by background thread)
+    _mic_level: float = 0.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def set_debug_payload(self, decision_summary: dict | None, llm_proposal: dict | None) -> None:
@@ -365,8 +491,11 @@ class SharedState:
             "pending_followup_question": self.pending_followup_question,
             "search_sub_phase": self.search_sub_phase,
             "search_ask_retries": self.search_ask_retries,
+            "conversation_transcript": list(self.conversation_transcript),
             # Dialogue manager reference (policy.py reads/creates this)
             "_dialogue_manager": self.dialogue_manager,
+            # Medical triage CV findings summary (additive — populated by _medical_triage_loop)
+            "_medical_findings_summary": getattr(self, "_medical_findings_summary", None),
         }
 
 
@@ -393,6 +522,22 @@ class OrchestratorAgent:
         self._sim_map_y = 160.0
         # Operator messages already spoken (indices) so we don't repeat
         self._operator_messages_spoken_through_index: int = -1
+
+        # Medical triage CV pipeline (additive — no existing code changed)
+        self._medical_pipeline: _TriagePipeline | None = None  # type: ignore[valid-type]
+        if _MEDICAL_AVAILABLE:
+            try:
+                self._medical_pipeline = _TriagePipeline(
+                    output_dir="reports",
+                    evidence_dir="reports/evidence",
+                    use_pose=True,
+                )
+                # Store ref on SharedState so _apply_decision_params can build report
+                self._state._medical_pipeline_ref = self._medical_pipeline  # type: ignore[attr-defined]
+                logger.info("Medical triage pipeline initialised.")
+            except Exception as e:
+                logger.warning("Medical triage pipeline init failed: %s", e)
+                self._medical_pipeline = None
 
         if config.io_mode == "robot":
             # Robot mode: use Robot Bridge server for camera, audio, and (gated) motion.
@@ -563,13 +708,15 @@ class OrchestratorAgent:
             await asyncio.sleep(0.02)
 
     async def _audio_loop(self) -> None:
-        """When in WAIT_FOR_RESPONSE (decision.wait_for_response_s), listen and store transcript."""
+        """When in WAIT_FOR_RESPONSE (decision.wait_for_response_s), listen immediately so you can speak during or after the robot."""
         if self._audio_io is None:
             return
         while not self._stop_event.is_set():
             decision = await self._state.get_decision()
             wait_s = decision.wait_for_response_s if decision else None
             if wait_s is not None and wait_s > 0:
+                # Listen right away (in parallel with TTS) so user can talk while robot is talking or right after
+                print("[Listening now — you can speak during or after the question]", flush=True)
                 loop = asyncio.get_event_loop()
                 raw = await loop.run_in_executor(
                     None,
@@ -578,6 +725,7 @@ class OrchestratorAgent:
                 transcript = (raw or "").strip() or None
                 if transcript:
                     self._state.last_response = transcript
+                    _append_transcript(self._state, "Victim", transcript)
                     self._state.no_response_count = 0
                     if self._event_manager:
                         await loop.run_in_executor(
@@ -598,8 +746,8 @@ class OrchestratorAgent:
                             "No response after %d attempts — assuming victim cannot talk; proceeding with visual inspection only.",
                             self._state.no_response_count,
                         )
-                self._state.last_asked_at = time.monotonic()
                 await self._state.set_decision(None)
+                self._state.last_speak_done = 0.0
             await asyncio.sleep(0.2)
 
     async def _policy_loop(self) -> None:
@@ -620,21 +768,65 @@ class OrchestratorAgent:
             phase_entered_at = conv.get("phase_entered_at") or 0.0
 
             llm_proposal = None
-            if api_key:
-                use_llm_search = phase == Phase.SEARCH_LOCALIZE.value and (
-                    (tick % llm_every_n == 0) or (phase_entered_at and (now - phase_entered_at) > llm_stuck_s)
-                )
-                use_llm_assist = phase == Phase.ASSIST_COMMUNICATE.value
-                if use_llm_search or use_llm_assist:
-                    try:
-                        llm_proposal = await loop.run_in_executor(
-                            None,
-                            lambda: propose_action(obs, conv, api_key=api_key),
-                        )
-                    except Exception as e:
-                        logger.debug("LLM proposal failed: %s", e)
+            use_llm_planner = getattr(self.config, "use_llm_planner", False)
 
-            decision = self._llm_policy.decide(obs, conv, llm_proposal=llm_proposal)
+            if use_llm_planner and api_key:
+                try:
+                    from himpublic.planner import (
+                        build_world_state,
+                        plan_next_actions,
+                        validate_plan,
+                        plan_to_decision,
+                        dispatch_action,
+                    )
+                    from himpublic.planner.executor import DISPATCH_ONLY_TOOLS
+                    ws = build_world_state(
+                        phase=phase,
+                        observation=obs,
+                        conversation_state=conv,
+                        tick=tick,
+                        last_action=(self._state.decision.action.value if self._state.decision else None),
+                        heard_voice=bool(conv.get("last_response")),
+                    )
+                    logger.info("[STATE] phase=%s persons=%d rubble=%d heard=%s", phase,
+                        len(ws.vision.get("persons", [])), len(ws.vision.get("rubble", [])),
+                        ws.audio.get("heard_voice"))
+                    plan = await loop.run_in_executor(
+                        None,
+                        lambda: plan_next_actions(ws, api_key=api_key),
+                    )
+                    ok, validated, errors = validate_plan(plan, phase)
+                    if errors:
+                        logger.warning("[PLANNER] validation: %s", errors)
+                    result = plan_to_decision(plan, validated)
+                    decision = result["decision"]
+                    remaining = result.get("remaining_actions", [])
+                    first_action = validated[0] if validated else None
+                    if first_action and first_action.tool in DISPATCH_ONLY_TOOLS:
+                        ctx = {"robot": self._robot, "audio_io": self._audio_io, "cc_client": self._cc_client}
+                        res = dispatch_action(first_action, ctx)
+                        logger.info("[EXEC] %s -> %s", first_action.tool, res.get("ok", False))
+                    llm_proposal = {"plan": plan.intent, "actions": [a.tool for a in validated]}
+                except Exception as e:
+                    logger.warning("[PLANNER] planner failed, falling back to FSM: %s", e)
+                    use_llm_planner = False
+
+            if not use_llm_planner:
+                if api_key:
+                    use_llm_search = phase == Phase.SEARCH_LOCALIZE.value and (
+                        (tick % llm_every_n == 0) or (phase_entered_at and (now - phase_entered_at) > llm_stuck_s)
+                    )
+                    use_llm_assist = phase == Phase.ASSIST_COMMUNICATE.value
+                    if use_llm_search or use_llm_assist:
+                        try:
+                            llm_proposal = await loop.run_in_executor(
+                                None,
+                                lambda: propose_action(obs, conv, api_key=api_key),
+                            )
+                        except Exception as e:
+                            logger.debug("LLM proposal failed: %s", e)
+
+                decision = self._llm_policy.decide(obs, conv, llm_proposal=llm_proposal)
             # Persist dialogue manager back from conv dict to SharedState (policy.py may create it)
             if conv.get("_dialogue_manager") is not None:
                 self._state.dialogue_manager = conv["_dialogue_manager"]
@@ -678,6 +870,10 @@ class OrchestratorAgent:
             # Apply decision params (triage state, capture, report send)
             _apply_decision_params(self._state, decision, now, self._cc_client)
 
+            # Exit gracefully when we reach DONE so user doesn't need Ctrl+C
+            if decision.mode == Phase.DONE.value:
+                self.request_stop()
+
             obs_summary = {"num_persons": len(obs.persons) if obs else 0, "confidence": getattr(obs, "confidence", 0) if obs else 0, "phase": phase}
             _log_llm_decision(now, phase, obs_summary, llm_proposal, getattr(decision, "used_llm", False))
 
@@ -711,9 +907,10 @@ class OrchestratorAgent:
                 await asyncio.sleep(0.1)
             self._robot.stop()
             return
-        # Local/Robot: AudioIO for SAY/ASK, wave via bridge. Post robot_said and robot_status to command center.
+        # Local/Robot: AudioIO for SAY/ASK, wave + motion via bridge. Post robot_said and robot_status to command center.
         last_spoke: str | None = None
         last_wave_phase: str | None = None  # track wave to avoid repeating
+        bridge = getattr(self, "_bridge_client", None)
         while not self._stop_event.is_set():
             # Post phase to comms chat only (do not speak phase out loud)
             pending = self._state.pending_phase_announcement
@@ -730,6 +927,23 @@ class OrchestratorAgent:
                     })
             decision = await self._state.get_decision()
 
+            # Robot bridge: apply motion (velocity/stop) so robot can "run to where it hears them" and approach
+            if bridge is not None and decision is not None:
+                obs = await self._state.get_observation()
+                override = self._reflex.override(obs)
+                action = override if override is not None else decision.action
+                loop = asyncio.get_event_loop()
+                if action == Action.STOP:
+                    await loop.run_in_executor(None, bridge.stop)
+                elif action == Action.ROTATE_LEFT:
+                    await loop.run_in_executor(None, lambda: bridge.set_velocity(0.0, 0.5))
+                elif action == Action.ROTATE_RIGHT:
+                    await loop.run_in_executor(None, lambda: bridge.set_velocity(0.0, -0.5))
+                elif action == Action.FORWARD_SLOW:
+                    await loop.run_in_executor(None, lambda: bridge.set_velocity(0.2, 0.0))
+                elif action not in (Action.WAVE, Action.SAY, Action.ASK, Action.WAIT):
+                    await loop.run_in_executor(None, bridge.stop)
+
             # Handle WAVE action: trigger robot hand wave via bridge
             if decision and decision.action == Action.WAVE:
                 wave_key = f"{self._state.phase}_{decision.params.get('search_sub_phase', '')}"
@@ -739,6 +953,7 @@ class OrchestratorAgent:
                     if decision.say and decision.say != last_spoke:
                         if self._audio_io:
                             self._audio_io.speak(decision.say)
+                        _append_transcript(self._state, "Robot", decision.say)
                         if self._cc_client and self._cc_client._enabled:
                             self._cc_client.post_event({"event": "robot_said", "text": decision.say})
                         last_spoke = decision.say
@@ -768,6 +983,8 @@ class OrchestratorAgent:
             elif decision and decision.say and decision.say != last_spoke:
                 if self._audio_io:
                     self._audio_io.speak(decision.say)
+                _append_transcript(self._state, "Robot", decision.say)
+                self._state.last_speak_done = time.monotonic()
                 if self._cc_client and self._cc_client._enabled:
                     self._cc_client.post_event({"event": "robot_said", "text": decision.say})
                 last_spoke = decision.say
@@ -777,6 +994,63 @@ class OrchestratorAgent:
                 last_spoke = None
                 last_wave_phase = None
             await asyncio.sleep(0.1)
+
+    async def _medical_triage_loop(self) -> None:
+        """Run medical triage CV assessment alongside perception when in relevant phases.
+
+        Additive loop — reads frames from frame_store, runs MedicalAssessor,
+        collects evidence, and stores findings on SharedState for policy/report use.
+        """
+        if self._medical_pipeline is None or self._frame_store is None:
+            return
+        loop = asyncio.get_event_loop()
+        assess_interval = 0.5  # assess at ~2 Hz (lighter than perception)
+        _TRIAGE_PHASES = {
+            Phase.INJURY_DETECTION.value,
+            Phase.ASSIST_COMMUNICATE.value,
+            Phase.SCAN_CAPTURE.value,
+        }
+
+        while not self._stop_event.is_set():
+            phase = self._state.phase
+
+            # Push every frame into evidence buffer (lightweight)
+            frame, obs = self._frame_store.get_latest()
+            if frame is not None:
+                self._medical_pipeline.push_frame(frame)
+
+            # Only run full assessment in triage-relevant phases
+            if phase in _TRIAGE_PHASES and frame is not None:
+                findings = await loop.run_in_executor(
+                    None,
+                    lambda f=frame: self._medical_pipeline.assess(f),
+                )
+
+                # If significant findings detected, collect evidence once
+                if self._medical_pipeline.has_significant_findings:
+                    if not getattr(self._state, "_medical_evidence_collected", False):
+                        evidence_dir = await loop.run_in_executor(
+                            None,
+                            lambda: self._medical_pipeline.collect_evidence(),
+                        )
+                        if evidence_dir:
+                            self._state._medical_evidence_collected = True  # type: ignore[attr-defined]
+                            logger.info("Medical evidence collected to %s", evidence_dir)
+
+                    # Post findings summary to command center + store on SharedState for policy
+                    summary = self._medical_pipeline.findings_summary()
+                    self._state._medical_findings_summary = summary  # type: ignore[attr-defined]
+                    if self._cc_client and self._cc_client._enabled:
+                        try:
+                            self._cc_client.post_event({
+                                "event": "medical_findings",
+                                "phase": phase,
+                                **summary,
+                            })
+                        except Exception:
+                            pass
+
+            await asyncio.sleep(assess_interval)
 
     async def _preview_loop(self) -> None:
         """Show live camera + phase/detection overlay when show_preview enabled. 'q' in window requests stop."""
@@ -796,6 +1070,23 @@ class OrchestratorAgent:
             n = len(obs.persons) if obs else 0
             cv2.putText(frame, f"Persons: {n}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
             cv2.putText(frame, "q = quit", (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+            # Mic level meter (right side): bar showing 0–100% of input level
+            level = getattr(self._state, "_mic_level", 0.0)
+            h, w = frame.shape[0], frame.shape[1]
+            meter_w = 24
+            meter_h = int(h * 0.5)
+            margin_r = 14
+            margin_t = int(h * 0.25)
+            x1 = w - margin_r - meter_w
+            x2 = w - margin_r
+            y1 = margin_t
+            y2 = margin_t + meter_h
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (50, 50, 50), 2)
+            fill_h = int(meter_h * max(0, min(1, level)))
+            if fill_h > 0:
+                fy1 = y2 - fill_h
+                cv2.rectangle(frame, (x1 + 1, fy1), (x2 - 1, y2 - 1), (0, 220, 0), -1)
+            cv2.putText(frame, "Mic", (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
             cv2.imshow("himpublic (walk-around)", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -901,6 +1192,14 @@ class OrchestratorAgent:
             logger.info("Search phase completed (found=%s), starting main loops", search_result.found)
 
         self._tasks = []
+        _mic_thread = None
+        if getattr(self.config, "show_preview", False) and getattr(self.config, "use_mic", True):
+            _mic_thread = threading.Thread(
+                target=_mic_level_thread,
+                args=(self._state, self._stop_event),
+                daemon=True,
+            )
+            _mic_thread.start()
         try:
             if self._video_source is not None:
                 self._tasks.append(asyncio.create_task(self._perception_loop()))
@@ -912,12 +1211,15 @@ class OrchestratorAgent:
             if self._cc_client and self._cc_client._enabled:
                 self._tasks.append(asyncio.create_task(self._telemetry_loop()))
                 self._tasks.append(asyncio.create_task(self._operator_message_loop()))
+            # Medical triage CV loop (additive — only runs if pipeline available)
+            if self._medical_pipeline is not None:
+                self._tasks.append(asyncio.create_task(self._medical_triage_loop()))
             await self._stop_event.wait()
         finally:
             await self._shutdown()
 
     async def _shutdown(self) -> None:
-        """Cancel tasks, release camera, stop robot."""
+        """Cancel tasks, release camera, stop robot. Save triage report if we have answers and none saved yet."""
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -926,6 +1228,40 @@ class OrchestratorAgent:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
+        # Save triage report on exit if we have answers (so Ctrl+C or early exit still produces a report)
+        triage_answers = dict(getattr(self._state, "triage_answers", {}))
+        if triage_answers and self._medical_pipeline is not None:
+            report_path = getattr(self._medical_pipeline, "report_path", None) or getattr(
+                self._medical_pipeline, "_report_path", None
+            )
+            if not report_path:
+                try:
+                    spoken = (
+                        triage_answers.get("injury_location")
+                        or triage_answers.get("injury_location_detail")
+                        or triage_answers.get("bleeding_location")
+                    )
+                    if spoken:
+                        self._medical_pipeline.set_spoken_body_region(str(spoken))
+                    transcript_lines = list(getattr(self._state, "conversation_transcript", []))
+                    path = self._medical_pipeline.build_report(
+                        scene_summary="Automated triage assessment by rescue robot.",
+                        victim_answers=triage_answers,
+                        notes=[
+                            "Generated on session end (shutdown).",
+                            f"Transcript turns captured: {len(transcript_lines)}.",
+                        ],
+                        conversation_transcript=transcript_lines,
+                        meta={"session_id": "shutdown"},
+                    )
+                    if path:
+                        logger.info("Medical triage report saved on shutdown: %s", path)
+                        try:
+                            print(f"[Report saved] {Path(path).resolve()}", flush=True)
+                        except Exception:
+                            print(f"[Report saved] {path}", flush=True)
+                except Exception as e:
+                    logger.warning("Report build on shutdown failed: %s", e)
         if self._video_source is not None:
             self._video_source.release()
             self._video_source = None

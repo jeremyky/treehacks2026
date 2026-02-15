@@ -90,3 +90,42 @@ We implement a **robot I/O smoke test layer** before building CV/autonomy:
 2. **Control validation**: TTS, velocity, stop must succeed on hardware before trusting perception output.
 3. **Fail fast**: Catch robot connection issues early; avoid debugging CV when the real problem is I/O.
 4. **Smoke test**: `scripts/smoke_test_robot.py` exercises BoosterAdapter (TTS, velocity, stop) and runs without crashing even when SDK methods raise `NotImplementedError`.
+
+## LLM Planner–Executor Decision Making
+
+A **Planner–Executor** architecture enables LLM-driven micro-decisions within each phase while the orchestrator remains the state machine and executor.
+
+### Architecture
+
+- **Planner (LLM)**: Receives a compact `WorldState` snapshot each tick and outputs a JSON plan: `intent`, `actions` (from allowed action space), `rationale`, `confidence`. Plan horizon is 1–5 actions; replan every tick after execution.
+- **Executor (existing code)**: Validates each action against phase-allowed tools and bounds (clamp rotate/walk/listen). Dispatches via existing functions or placeholders. Updates state; planner runs again next tick.
+
+### Modules
+
+| Module | Responsibility |
+|--------|----------------|
+| `planner/schema.py` | WorldState dataclass, action space (ALLOWED_TOOLS), phase→allowed tools map |
+| `planner/llm_planner.py` | `plan_next_actions(world_state)` – prompt, JSON parse, fallback to `wait(1.0)` on failure |
+| `planner/executor.py` | `validate_plan()`, `dispatch_action()`, `plan_to_decision()` |
+
+### WorldState
+
+- `phase`, `tick`, `vision` (persons, rubble), `audio` (heard_voice, voice_angle_deg), `robot` (heading, last_action, constraints), `case_file` (triage state). JSON-serializable.
+
+### Action Space (examples)
+
+Navigation: `call_out`, `listen`, `rotate`, `walk_forward`, `scan_pan`, `wait`. Perception: `scan_vision`, `capture_image`, `analyze_images_vlm`. Interaction: `push_obstacle`, `approach_person`. Medical: `ask`, `update_case`, `generate_report`.
+
+### Integration
+
+- Config: `use_llm_planner: bool` (default False). Env: `HIMPUBLIC_USE_LLM_PLANNER=1`. CLI: `--use-llm-planner`.
+- When enabled, policy loop builds WorldState, calls planner, validates, converts first action to Decision, and dispatches non-actuation tools (e.g. `push_obstacle`) via `dispatch_action`.
+- Logging: `[PLANNER]` plan JSON, `[EXEC]` action results, `[STATE]` key observations.
+
+### Test Harness
+
+```bash
+python -m himpublic.tools.test_planner --scenario search_no_person
+python -m himpublic.tools.test_planner --scenario voice_at_30deg
+python -m himpublic.tools.test_planner --scenario victim_bleeding_leg --use-llm  # requires OPENAI_API_KEY
+```

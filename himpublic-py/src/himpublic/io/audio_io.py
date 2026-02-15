@@ -24,27 +24,51 @@ class AudioIO(Protocol):
         ...
 
 
-def _listen_microphone(timeout_s: float) -> str | None:
-    """Use speech_recognition + PyAudio to listen from default mic. Returns transcript or None.
-    Raises ImportError if speech_recognition or mic not available.
+def _transcribe(audio, recognizer) -> str | None:
+    """Try Google first; if that fails, try Whisper if available (often better accuracy)."""
+    import speech_recognition as sr
+    try:
+        text = recognizer.recognize_google(audio)
+        return (text or "").strip() or None
+    except (sr.UnknownValueError, sr.RequestError):
+        pass
+    if hasattr(recognizer, "recognize_whisper"):
+        try:
+            text = recognizer.recognize_whisper(audio, language="en", model="base")
+            return (text or "").strip() or None
+        except Exception:
+            pass
+    return None
+
+
+def _listen_microphone(timeout_s: float, retries: int = 2) -> str | None:
+    """Listen from default mic. Stops when you pause ~1s (phrase done) or hit timeout.
+    Transcription: Google Speech API (free); Whisper tried if that fails.
     """
     import speech_recognition as sr  # raises ImportError if not installed
     r = sr.Recognizer()
     with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source, duration=0.3)
-        logger.debug("Listening from microphone (timeout %.1fs)...", timeout_s)
-        try:
-            audio = r.listen(source, timeout=timeout_s, phrase_time_limit=min(timeout_s, 10.0))
-        except sr.WaitTimeoutError:
-            return None
-    try:
-        text = r.recognize_google(audio)
-        return text.strip() or None
-    except sr.UnknownValueError:
-        return None
-    except sr.RequestError as e:
-        logger.warning("Speech recognition request failed: %s", e)
-        return None
+        r.adjust_for_ambient_noise(source, duration=1.0)
+        r.energy_threshold = max(100, int(getattr(r, "energy_threshold", 300) * 0.65))
+        # ~1s of silence after you talk = consider phrase done and stop listening
+        if hasattr(r, "pause_threshold"):
+            r.pause_threshold = 1.0
+        logger.debug("Listening from microphone (timeout %.1fs, stop after 1s silence)...", timeout_s)
+        phrase_limit = min(timeout_s, 35.0)
+        for attempt in range(max(1, retries + 1)):
+            try:
+                audio = r.listen(source, timeout=timeout_s, phrase_time_limit=phrase_limit)
+            except sr.WaitTimeoutError:
+                if attempt < retries:
+                    print("[Listening] No speech detected — listening again...", flush=True)
+                    continue
+                return None
+            text = _transcribe(audio, r)
+            if text:
+                return text
+            if attempt < retries:
+                print("[Listening] Could not understand — listening again...", flush=True)
+    return None
 
 
 # Slower speech rate (words per minute). Default pyttsx3 is often ~200; ~130 is calmer.
@@ -102,17 +126,38 @@ class LocalAudioIO:
 
     def listen(self, timeout_s: float) -> str | None:
         """
-        Listen for response: from microphone (if use_mic and speech_recognition available) or stdin.
+        Listen for response: from microphone (if use_mic) with 3 attempts; if still nothing, offer type-in.
         Returns transcript or None on timeout/no speech.
         """
         if self._use_mic:
             try:
-                print(f"[Listening] Speak now (mic, timeout {timeout_s:.0f}s)...", flush=True)
-                transcript = _listen_microphone(timeout_s)
+                if not getattr(self, "_transcribe_info_shown", False):
+                    self._transcribe_info_shown = True
+                    print("[Transcription: Google Speech API (free). If words are wrong, type your answer when prompted.]", flush=True)
+                print(f"[Listening] Speak clearly toward the mic (timeout {timeout_s:.0f}s)...", flush=True)
+                transcript = _listen_microphone(timeout_s, retries=2)  # 3 attempts total
                 if transcript:
+                    print("[Done listening.]", flush=True)
                     logger.info("Heard: %s", transcript)
                     print(f"[Heard] {transcript}", flush=True)
-                return transcript
+                    return transcript
+                print("[Done listening.]", flush=True)
+                # Mic got nothing — offer quick type-in so user isn't stuck
+                print("[Listening] Didn't catch that. Type your answer and press Enter (8s):", flush=True)
+                try:
+                    import select
+                    if sys.platform != "win32":
+                        r, _, _ = select.select([sys.stdin], [], [], 8.0)
+                        if r:
+                            line = sys.stdin.readline()
+                            t = line.strip() or None
+                            if t:
+                                logger.info("Heard (typed): %s", t)
+                                print(f"[Heard] {t}", flush=True)
+                                return t
+                except (ImportError, OSError, ValueError):
+                    pass
+                return None
             except ImportError:
                 logger.warning(
                     "Microphone not available (pip install SpeechRecognition PyAudio). Using keyboard."
@@ -122,7 +167,7 @@ class LocalAudioIO:
             except Exception as e:
                 logger.warning("Microphone listen failed: %s. Using keyboard.", e)
                 self._use_mic = False
-        # Stdin fallback
+        # Stdin-only path
         logger.info("Listening for response (type and press Enter within %.1fs)", timeout_s)
         print(f"[Listening] Type your response and press Enter (timeout {timeout_s:.0f}s)...", flush=True)
         try:

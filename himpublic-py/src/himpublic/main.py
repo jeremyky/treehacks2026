@@ -1,4 +1,15 @@
-"""Entrypoint for HIM Public orchestrator."""
+"""Entrypoint for HIM Public orchestrator.
+
+Robot pipeline (--io robot):
+  1. Deploy: run with --io robot --robot-bridge-url <K1_BRIDGE_URL>. Boot runs (video/mic check).
+  2. Ask "Is anyone there?": SEARCH_LOCALIZE starts with ASK "Is anyone there? Can you hear me?" (8s listen via robot mic).
+  3. Run to where it hears them: on voice response OR when camera sees person/rubble, policy transitions to APPROACH_CONFIRM;
+     actuation sends velocity/stop to bridge (set_velocity, stop) so the robot rotates and moves forward toward target.
+  4. Identify where they are: APPROACH_CONFIRM centers on detection (rotate/forward) until standoff; then SCENE_SAFETY_TRIAGE.
+  5. Take out debris: DEBRIS_ASSESSMENT — robot says "I found debris...", then WAVE (bridge /wave) to signal clearing.
+  6. Ask questions and scan photos: ASSIST_COMMUNICATE (triage Q&A via bridge TTS + record → ASR), then SCAN_CAPTURE (evidence images).
+  7. Medical report: REPORT_SEND builds report from transcript + evidence, writes to reports/; then DONE and clean exit.
+"""
 
 from __future__ import annotations
 
@@ -67,6 +78,8 @@ def parse_args() -> argparse.Namespace:
                    help="Robot Bridge server URL (for --io robot). Default: http://192.168.10.102:9090")
     p.add_argument("--search-target", choices=["person", "rubble"], default="rubble",
                    help="What to search for: 'person' (COCO person class) or 'rubble' (any object). Default: rubble")
+    p.add_argument("--use-llm-planner", action="store_true",
+                   help="Use LLM Planner-Executor for decisions (requires OPENAI_API_KEY)")
     return p.parse_args()
 
 
@@ -101,6 +114,7 @@ def main() -> int:
         debug_decisions=getattr(args, "debug_decisions", False),
         robot_bridge_url=getattr(args, "robot_bridge_url", None),
         search_target=getattr(args, "search_target", "rubble"),
+        use_llm_planner=getattr(args, "use_llm_planner", False),
     )
     setup_logging(config.log_level)
 

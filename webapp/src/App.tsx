@@ -28,7 +28,6 @@ function commsToMessages(comms: CommsEntry[]): CommsMessage[] {
 }
 
 function CommandCenterPage() {
-  const [medical, setMedical] = useState<MedicalAssessment | null>(null);
   const [loading, setLoading] = useState(false);
   const [latest, setLatest] = useState<LatestResponse | null>(null);
   const [snapshotKey, setSnapshotKey] = useState(0);
@@ -117,8 +116,8 @@ function CommandCenterPage() {
           <Robots />
         </div>
         <div className="grid grid-cols-2 gap-1.5 min-h-0">
-          <ETA />
-          <InjuryReport medical={medical} />
+          <ETA snapshotUrl={snapshotUrl} />
+          <InjuryReport medical={null} />
         </div>
         {lastReport && (
           <div className="shrink-0 border-t border-base-700 p-2 max-h-[200px] overflow-hidden flex flex-col">
