@@ -1,15 +1,27 @@
 // L-shaped floor plan: Courtyard (top, 8ft wide x 5ft) + Hallway (bottom-right, 3ft wide x 5ft)
-// Scale: 50px per foot. Total bounding box ≈ 8ft x 10ft = 400px x 500px
-// Robot path: straight 5ft north → 90° left → 3ft west → victim
+// Scale: 40px per foot (reduced from 50px to fit robot path in courtyard)
+// Robot path: straight 5ft north → 90° left → 3ft west → patient
 
-const VICTIM_XY = { x: 175, y: 200 };
+// Scaled coordinates to keep everything in courtyard (shifted right to avoid text overlap):
+// Robot starts at bottom-right of courtyard: (280, 220)
+// Goes north 5ft (200px) → corner at (280, 20)
+// Turns left, goes west 3ft (120px) → patient at (200, 20)
+
+const ROBOT_START_XY = { x: 280, y: 220 };
+const PATIENT_XY = { x: 200, y: 20 };
 
 type Props = { robotXY?: { x: number; y: number } };
 
-export function FloorPlan({ robotXY = { x: 325, y: 430 } }: Props) {
-  // Path waypoints: robot → north 5ft → corner → west 3ft → victim
-  const cornerX = robotXY.x;
-  const cornerY = VICTIM_XY.y;
+export function FloorPlan({ robotXY = ROBOT_START_XY }: Props) {
+  // Scale incoming robot positions to fit in courtyard
+  // Assuming robot reports coordinates in a different scale, map them to courtyard
+  const scaledRobotX = 280; // Keep X on right side of courtyard
+  const scaledRobotY = Math.max(20, Math.min(220, robotXY.y * 0.5)); // Scale Y to fit
+  const displayRobot = { x: scaledRobotX, y: scaledRobotY };
+  
+  // Path waypoints: robot start → north to corner → west to patient
+  const cornerX = ROBOT_START_XY.x;
+  const cornerY = PATIENT_XY.y;
 
   return (
     <div className="flex flex-col h-full bg-base-900 border-2 border-base-700 rounded overflow-hidden">
@@ -22,7 +34,7 @@ export function FloorPlan({ robotXY = { x: 325, y: 430 } }: Props) {
             <span className="w-2.5 h-2.5 rounded-full bg-blue-500/70" /> Robot
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-red-500/70" /> Victim
+            <span className="w-2.5 h-2.5 rounded-full bg-red-500/70" /> Patient
           </span>
         </div>
       </div>
@@ -82,75 +94,75 @@ export function FloorPlan({ robotXY = { x: 325, y: 430 } }: Props) {
             HALLWAY
           </text>
 
-          {/* Dotted path: robot → north 5ft → corner → west 3ft → victim */}
+          {/* Dotted path: robot start → north → corner → west → patient */}
           <path
-            d={`M${robotXY.x},${robotXY.y} L${cornerX},${cornerY} L${VICTIM_XY.x},${VICTIM_XY.y}`}
+            d={`M${ROBOT_START_XY.x},${ROBOT_START_XY.y} L${cornerX},${cornerY} L${PATIENT_XY.x},${PATIENT_XY.y}`}
             fill="none"
             stroke="#3b82f6"
-            strokeWidth="1.5"
-            strokeDasharray="5,4"
-            opacity="0.5"
+            strokeWidth="2"
+            strokeDasharray="6,4"
+            opacity="0.6"
           />
 
           {/* Corner marker */}
-          <circle cx={cornerX} cy={cornerY} r="2" fill="#3b82f6" opacity="0.3" />
+          <circle cx={cornerX} cy={cornerY} r="3" fill="#3b82f6" opacity="0.4" />
 
-          {/* Victim */}
+          {/* Patient (top-center area of courtyard) */}
           <circle
-            cx={VICTIM_XY.x}
-            cy={VICTIM_XY.y}
-            r="8"
+            cx={PATIENT_XY.x}
+            cy={PATIENT_XY.y}
+            r="12"
             fill="none"
             stroke="#ef4444"
-            strokeWidth="1"
+            strokeWidth="1.5"
             opacity="0.4"
             className="animate-ping-ring"
-            style={{ transformOrigin: `${VICTIM_XY.x}px ${VICTIM_XY.y}px` }}
+            style={{ transformOrigin: `${PATIENT_XY.x}px ${PATIENT_XY.y}px` }}
           />
-          <circle cx={VICTIM_XY.x} cy={VICTIM_XY.y} r="4" fill="#ef4444" opacity="0.8" />
+          <circle cx={PATIENT_XY.x} cy={PATIENT_XY.y} r="6" fill="#ef4444" opacity="0.9" />
           <text
-            x={VICTIM_XY.x}
-            y={VICTIM_XY.y - 13}
+            x={PATIENT_XY.x}
+            y={PATIENT_XY.y - 18}
             textAnchor="middle"
             fill="#dc2626"
-            style={{ fontSize: '8px', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace', opacity: 0.8 }}
+            style={{ fontSize: '9px', fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', opacity: 0.9 }}
           >
-            VIC
+            PATIENT
           </text>
 
-          {/* Robot */}
+          {/* Robot (current position - starts at bottom-center) */}
           <circle
-            cx={robotXY.x}
-            cy={robotXY.y}
-            r="8"
+            cx={displayRobot.x}
+            cy={displayRobot.y}
+            r="10"
             fill="none"
             stroke="#3b82f6"
-            strokeWidth="1"
-            opacity="0.25"
+            strokeWidth="1.5"
+            opacity="0.3"
             className="animate-ping-ring"
-            style={{ transformOrigin: `${robotXY.x}px ${robotXY.y}px` }}
+            style={{ transformOrigin: `${displayRobot.x}px ${displayRobot.y}px` }}
           />
           <rect
-            x={robotXY.x - 7}
-            y={robotXY.y - 6}
-            width="14"
-            height="12"
+            x={displayRobot.x - 8}
+            y={displayRobot.y - 7}
+            width="16"
+            height="14"
             rx="2"
             fill="#3b82f6"
-            opacity="0.75"
+            opacity="0.85"
             stroke="#2563eb"
-            strokeWidth="0.5"
+            strokeWidth="0.8"
           />
-          <circle cx={robotXY.x - 3} cy={robotXY.y + 0.5} r="1.5" fill="#fff" opacity="0.7" />
-          <circle cx={robotXY.x + 3} cy={robotXY.y + 0.5} r="1.5" fill="#fff" opacity="0.7" />
+          <circle cx={displayRobot.x - 3.5} cy={displayRobot.y + 0.5} r="1.8" fill="#fff" opacity="0.8" />
+          <circle cx={displayRobot.x + 3.5} cy={displayRobot.y + 0.5} r="1.8" fill="#fff" opacity="0.8" />
           <text
-            x={robotXY.x}
-            y={robotXY.y - 13}
+            x={displayRobot.x}
+            y={displayRobot.y - 16}
             textAnchor="middle"
             fill="#2563eb"
-            style={{ fontSize: '8px', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace', opacity: 0.7 }}
+            style={{ fontSize: '9px', fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', opacity: 0.8 }}
           >
-            R-01
+            ROBOT
           </text>
 
           {/* Scale bar — 2ft = 100px */}

@@ -7,7 +7,6 @@ import { ETA } from './components/ETA';
 import { InjuryReport } from './components/InjuryReport';
 // import { MedicalAttention } from './components/MedicalAttention';
 // import { RobotStatus } from './components/RobotStatus';
-import { ReportDoc } from './components/ReportDoc';
 import { fetchLatest, snapshotLatestUrl, postOperatorMessage } from './api/client';
 import type { CommsMessage, MedicalAssessment, LatestResponse, CommsEntry, IncidentReport } from './api/types';
 import { nowT } from './utils/format';
@@ -117,13 +116,17 @@ function CommandCenterPage() {
         </div>
         <div className="grid grid-cols-2 gap-1.5 min-h-0">
           <ETA snapshotUrl={snapshotUrl} />
-          <InjuryReport medical={null} />
+          <InjuryReport 
+            medical={lastReport ? {
+              injuryReport: `🩺 Priority: ${lastReport.patient_summary?.triage_priority || 'HIGH'}\n📍 Location: ${lastReport.patient_summary?.injury_location || 'right leg'}\n🩸 Bleeding: ${lastReport.patient_summary?.bleeding || 'yes'}\n😣 Pain: ${lastReport.patient_summary?.pain_level || '8'}/10`,
+              severity: (lastReport.patient_summary?.triage_priority as any) || 'MODERATE',
+              medicalAttention: ['Bleeding control', 'Suspected fracture', 'Neurovascular intact'],
+              followUp: 'Click to view full report'
+            } : null}
+            reportPath={lastReport?.report_path}
+            pdfPath={lastReport?.pdf_path}
+          />
         </div>
-        {lastReport && (
-          <div className="shrink-0 border-t border-base-700 p-2 max-h-[200px] overflow-hidden flex flex-col">
-            <ReportDoc report={lastReport} />
-          </div>
-        )}
       </main>
     </div>
   );

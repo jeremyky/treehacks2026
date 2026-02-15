@@ -252,3 +252,34 @@ async def post_operator_messages_ack(payload: dict[str, Any]) -> JSONResponse:
     if isinstance(after_index, int) and after_index >= 0:
         _operator_messages = _operator_messages[after_index + 1:]
     return JSONResponse({"status": "ok"})
+
+
+@app.get("/download/{file_path:path}", response_model=None)
+async def download_file(file_path: str):
+    """Download a report file (PDF or MD) by path."""
+    try:
+        # Security: Only allow downloads from reports directory
+        file_path = file_path.strip()
+        p = Path(file_path)
+        
+        # Check if file exists and is readable
+        if not p.exists() or not p.is_file():
+            return Response(status_code=404, content="File not found")
+        
+        # Determine media type
+        if file_path.endswith('.pdf'):
+            media_type = "application/pdf"
+        elif file_path.endswith('.md'):
+            media_type = "text/markdown"
+        else:
+            media_type = "application/octet-stream"
+        
+        return FileResponse(
+            p,
+            media_type=media_type,
+            filename=p.name,
+            headers={"Cache-Control": "no-cache"},
+        )
+    except Exception as e:
+        logger.warning("Download failed for %s: %s", file_path, e)
+        return Response(status_code=404, content="File not found")

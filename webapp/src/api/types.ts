@@ -63,6 +63,13 @@ export interface SnapshotHistoryResponse {
 export interface IncidentReport {
   incident_id?: string;
   received_at?: string;
+  document?: string;
+  report_path?: string;
+  pdf_path?: string;
+  annotated_images?: string[];
+  images?: string[];
+  transcript?: string[];
+  patient_summary?: Record<string, unknown>;
   [key: string]: unknown;
 }
 

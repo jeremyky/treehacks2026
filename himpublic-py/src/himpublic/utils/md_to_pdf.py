@@ -33,7 +33,9 @@ th { background: #f0f0f0; }
 img { max-width: 100%; height: auto; }
 blockquote { margin: 0.5em 0; padding-left: 1em; border-left: 3px solid #888; color: #444; }
 """)
-except ImportError:
+except Exception as e:
+    # Catch both ImportError and OSError (missing system libs like Pango)
+    logger.debug("weasyprint unavailable: %s", e)
     markdown = None  # type: ignore[assignment]
     HTML = None  # type: ignore[assignment]
 
@@ -63,14 +65,18 @@ def _md_to_pdf_weasyprint(md_path: Path, pdf_path: Path) -> bool:
 
 def _md_to_pdf_pandoc(md_path: Path, pdf_path: Path) -> bool:
     if _PDF_BACKEND == "pypandoc" and pypandoc is not None:
-        pypandoc.convert_file(str(md_path), "pdf", outputfile=str(pdf_path))
+        pypandoc.convert_file(str(md_path), "pdf", outputfile=str(pdf_path), extra_args=["--pdf-engine=xelatex"])
         return True
+    # Use xelatex for better Unicode support (handles ✓, emojis, etc.)
+    # Use just the filename since we set cwd to parent directory
     r = subprocess.run(
-        ["pandoc", str(md_path), "-o", str(pdf_path)],
+        ["pandoc", md_path.name, "-o", pdf_path.name, "--pdf-engine=xelatex"],
         capture_output=True,
         timeout=60,
         cwd=str(md_path.parent),
     )
+    if r.returncode != 0:
+        logger.debug("pandoc stderr: %s", r.stderr.decode())
     return r.returncode == 0
 
 

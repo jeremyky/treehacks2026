@@ -25,6 +25,10 @@ cd himpublic-py
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
+# Set up environment variables (see .env.example)
+cp .env.example .env
+# Edit .env and add your API keys
+
 # Terminal 1: run command center server
 python scripts/run_command_center.py
 
@@ -108,19 +112,40 @@ pip install -r code/requirements.txt
 
 ### 2. Set up API keys
 
-You'll need API keys for voice features:
+You'll need API keys for voice features. **Use environment variables or .env file** (recommended):
 
 ```bash
-# Add to ~/.zshrc or ~/.bashrc
+# Option 1: Copy and configure .env file (recommended)
+cp .env.example .env
+# Then edit .env and add your API keys
+
+# Option 2: Export directly in your shell (add to ~/.zshrc or ~/.bashrc)
 export ELEVENLABS_API_KEY='your-key-here'  # For realistic TTS
 export OPENAI_API_KEY='your-key-here'      # For real-time voice chat
+export K1_SSH_PASSWORD='your-robot-password'  # For robot access
 ```
 
 Get keys from:
 - ElevenLabs: https://elevenlabs.io/app/settings/api-keys
 - OpenAI: https://platform.openai.com/api-keys
 
-### 3. Install Booster SDK (for robot control)
+⚠️ **Never commit your `.env` file or API keys to git!**
+
+### 3. Download YOLO model files
+
+Model files are not included in the repository. Download them:
+
+```bash
+# YOLOv8 Nano (basic detection, ~6MB)
+wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+
+# YOLOv8 Small World v2 (open vocabulary, ~25MB)
+wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8s-worldv2.pt
+```
+
+See `../MODELS_SETUP.md` for more details.
+
+### 4. Install Booster SDK (for robot control)
 
 See `week1/plan.md` for full instructions, or:
 

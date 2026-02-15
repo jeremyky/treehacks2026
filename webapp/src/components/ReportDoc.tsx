@@ -4,10 +4,18 @@ type Props = { report: IncidentReport };
 
 /** Shows the incident report / docs from the robot once created; stays visible. */
 export function ReportDoc({ report }: Props) {
-  const { incident_id, received_at, document: documentText, ...rest } = report;
+  const { incident_id, received_at, document: documentText, report_path, pdf_path, ...rest } = report;
   const restKeys = Object.keys(rest).filter(
-    (k) => rest[k] !== undefined && rest[k] !== null && rest[k] !== '' && k !== 'document'
+    (k) => rest[k] !== undefined && rest[k] !== null && rest[k] !== '' && k !== 'document' && k !== 'report_path' && k !== 'pdf_path'
   );
+
+  const handleDownload = (path: string, filename: string) => {
+    // Create download link
+    const link = document.createElement('a');
+    link.href = `http://localhost:8000/download/${encodeURIComponent(path)}`;
+    link.download = filename;
+    link.click();
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-base-900 border border-base-700 rounded overflow-hidden">
@@ -15,9 +23,29 @@ export function ReportDoc({ report }: Props) {
         <span className="text-[10px] font-semibold uppercase tracking-widest text-base-400 font-mono">
           Incident report
         </span>
-        {incident_id && (
-          <span className="text-[9px] font-mono text-base-500">{incident_id}</span>
-        )}
+        <div className="flex items-center gap-2">
+          {pdf_path && (
+            <button
+              onClick={() => handleDownload(pdf_path, 'medical_report.pdf')}
+              className="text-[9px] font-mono px-2 py-1 rounded bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30 transition-colors"
+              title="Download PDF"
+            >
+              📄 PDF
+            </button>
+          )}
+          {report_path && (
+            <button
+              onClick={() => handleDownload(report_path, 'medical_report.md')}
+              className="text-[9px] font-mono px-2 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-600/30 transition-colors"
+              title="Download Markdown"
+            >
+              📝 MD
+            </button>
+          )}
+          {incident_id && (
+            <span className="text-[9px] font-mono text-base-500">{incident_id}</span>
+          )}
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto p-2 text-[11px] font-mono text-base-200 space-y-1">
         {received_at && (

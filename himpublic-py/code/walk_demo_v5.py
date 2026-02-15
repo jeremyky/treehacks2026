@@ -319,7 +319,7 @@ def play_keyframe_with_screenshots(keyframe_name: str, code_dir: str, capture: b
                         cc_post_snapshot(resp.content, meta={"phase": "scan", "frame": frame_num})
                 except Exception:
                     pass
-                time.sleep(0.8)  # capture every 0.8s during keyframe
+                time.sleep(0.5)  # capture every 0.5s for more frames
         
         capture_thread = threading.Thread(target=capture_during_keyframe, daemon=True)
         capture_thread.start()
@@ -496,8 +496,20 @@ def main():
         print("\n" + "=" * 50)
         print("  CAPTURING SCREENSHOTS DURING HEAD SCAN")
         print("=" * 50)
-        scan_image_paths = play_keyframe_with_screenshots("head", code_dir, capture=True)
-        print(f"✓ Captured {len(scan_image_paths)} screenshots")
+        all_scan_frames = play_keyframe_with_screenshots("head", code_dir, capture=True)
+        print(f"✓ Captured {len(all_scan_frames)} screenshots")
+        
+        # Select best frames for medical report (middle frames most likely to show injury)
+        if len(all_scan_frames) >= 3:
+            # Use middle frames (most likely to show the red band/injury)
+            mid_idx = len(all_scan_frames) // 2
+            scan_image_paths = all_scan_frames[mid_idx-1:mid_idx+2]  # 3 frames around middle
+            print(f"✓ Selected frames {mid_idx} to {mid_idx+2} for medical report (best injury visibility)")
+        elif all_scan_frames:
+            scan_image_paths = all_scan_frames
+        else:
+            scan_image_paths = []
+            print("⚠ No screenshots captured")
 
         # ── Phase 6: Generate medical report ───────────────
         cc_status("Generating report", "REPORT")
