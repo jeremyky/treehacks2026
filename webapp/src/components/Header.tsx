@@ -18,25 +18,25 @@ export function Header() {
   }, []);
 
   return (
-    <header className="h-10 bg-base-900 border-b border-base-700 flex items-center justify-between px-4 shrink-0 font-mono">
-      <div className="flex items-center gap-3">
-        <span className="text-[11px] font-semibold tracking-wider text-base-200">ADAM-OPS</span>
-        <nav className="flex items-center gap-1.5">
+    <header className="h-12 bg-base-900 border-b-2 border-base-700 flex items-center justify-between px-5 shrink-0 font-mono">
+      <div className="flex items-center gap-4">
+        <span className="text-[15px] font-semibold tracking-wider text-base-200">ADAM-OPS</span>
+        <nav className="flex items-center gap-2">
           <a
             href="/"
-            className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+            className={`text-[14px] px-3 py-1 rounded border transition-colors ${
               isDebug
                 ? 'border-base-700 bg-base-900 text-base-400 hover:bg-base-800 hover:text-base-200'
-                : 'border-amber-400/60 bg-base-950 text-base-200'
+                : 'border-blue-400/60 bg-base-950 text-base-200 font-semibold'
             }`}
           >
             Command
           </a>
           <a
             href="/debug"
-            className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+            className={`text-[14px] px-3 py-1 rounded border transition-colors ${
               isDebug
-                ? 'border-amber-400/60 bg-base-950 text-base-200'
+                ? 'border-blue-400/60 bg-base-950 text-base-200 font-semibold'
                 : 'border-base-700 bg-base-900 text-base-400 hover:bg-base-800 hover:text-base-200'
             }`}
           >
@@ -44,7 +44,7 @@ export function Header() {
           </a>
         </nav>
       </div>
-      <div className="flex items-center gap-5 text-[10px] text-base-400 tracking-wide">
+      <div className="flex items-center gap-5 text-[14px] text-base-400 tracking-wide">
         <span>{clk}</span>
         <span>
           T+ <span className="text-base-200">{fmtTime(el)}</span>

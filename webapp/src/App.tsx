@@ -5,8 +5,8 @@ import { FloorPlan } from './components/FloorPlan';
 import { Robots } from './components/Robots';
 import { ETA } from './components/ETA';
 import { InjuryReport } from './components/InjuryReport';
-import { MedicalAttention } from './components/MedicalAttention';
-import { RobotStatus } from './components/RobotStatus';
+// import { MedicalAttention } from './components/MedicalAttention';
+// import { RobotStatus } from './components/RobotStatus';
 import { ReportDoc } from './components/ReportDoc';
 import { fetchLatest, snapshotLatestUrl, postOperatorMessage } from './api/client';
 import type { CommsMessage, MedicalAssessment, LatestResponse, CommsEntry, IncidentReport } from './api/types';
@@ -100,13 +100,13 @@ function CommandCenterPage() {
     if (e && typeof e.robot_map_x === 'number' && typeof e.robot_map_y === 'number') {
       return { x: e.robot_map_x, y: e.robot_map_y };
     }
-    return { x: 255, y: 162 };
+    return { x: 325, y: 430 };
   }, [latest?.event?.robot_map_x, latest?.event?.robot_map_y]);
 
   return (
     <div className="h-screen flex flex-col bg-base-950 text-base-200 font-sans">
       <Header />
-      <main className="flex-1 grid grid-cols-[260px_1fr_200px] grid-rows-[1fr_160px] gap-1.5 p-1.5 overflow-hidden min-h-0">
+      <main className="flex-1 grid grid-cols-[260px_1fr_200px] grid-rows-[3fr_2fr] gap-1.5 p-1.5 overflow-hidden min-h-0">
         <div className="row-span-2 min-h-0">
           <Chat msgs={msgs} onSend={handleSend} loading={loading} />
         </div>
@@ -116,11 +116,9 @@ function CommandCenterPage() {
         <div className="row-span-2 min-h-0">
           <Robots />
         </div>
-        <div className="grid grid-cols-[140px_140px_1fr_1fr] gap-1.5 min-h-0">
-          <RobotStatus event={latest?.event ?? null} snapshotUrl={snapshotUrl} />
+        <div className="grid grid-cols-2 gap-1.5 min-h-0">
           <ETA />
           <InjuryReport medical={medical} />
-          <MedicalAttention medical={medical} />
         </div>
         {lastReport && (
           <div className="shrink-0 border-t border-base-700 p-2 max-h-[200px] overflow-hidden flex flex-col">
