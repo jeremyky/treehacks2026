@@ -391,7 +391,7 @@ function InjuryReport({ medical }) {
       <div className="flex-1 overflow-y-auto">
         {medical
           ? <div className="text-[11px] text-base-200 leading-relaxed">{medical.injuryReport}</div>
-          : <div className="text-[11px] text-base-500 italic">Awaiting victim report...</div>
+          : <div className="text-[11px] text-base-500 italic">Awaiting medical injury report...</div>
         }
       </div>
     </div>
@@ -413,7 +413,7 @@ function MedicalAttention({ medical }) {
                 <span className="text-base-200">{item}</span>
               </div>
             ))
-          : <div className="text-[11px] text-base-500 italic">Awaiting victim report...</div>
+          : <div className="text-[11px] text-base-500 italic">Awaiting medical injury report...</div>
         }
       </div>
     </div>

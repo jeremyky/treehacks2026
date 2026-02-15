@@ -19,7 +19,7 @@ export function MedicalAttention({ medical }: Props) {
             </div>
           ))
         ) : (
-          <div className="text-[11px] text-base-500 italic">Awaiting victim report...</div>
+          <div className="text-[11px] text-base-500 italic">Awaiting medical injury report...</div>
         )}
       </div>
     </div>

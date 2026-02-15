@@ -77,22 +77,22 @@ export function Chat({ msgs, onSend, loading }: Props) {
           </div>
         )}
       </div>
-      <div className="flex flex-wrap gap-1.5 px-2 pt-2 border-t border-base-700 shrink-0">
+      <div className="flex flex-wrap gap-1 px-2 pt-2 border-t border-base-700 shrink-0">
         {QUICK_REPLIES.map((q) => (
           <button
             key={q}
             onClick={() => !loading && onSend(q)}
             disabled={loading}
-            className="text-[14px] font-mono px-3 py-1.5 rounded border border-base-600 bg-base-800 text-base-300 hover:bg-base-700 hover:text-base-100 disabled:opacity-40 transition-colors"
+            className="text-[11px] font-mono px-2 py-1 rounded border border-base-600 bg-base-800 text-base-300 hover:bg-base-700 hover:text-base-100 disabled:opacity-40 transition-colors"
           >
             {q}
           </button>
         ))}
       </div>
-      <div className="flex gap-2 p-2 shrink-0">
+      <div className="flex gap-1.5 p-2 shrink-0">
         <input
-          className="flex-1 bg-base-950 border border-base-700 rounded px-3 py-2 text-[16px] text-base-200 outline-none focus:border-base-500 transition-colors font-sans"
-          placeholder="Type to have robot say (or quick-reply below)..."
+          className="flex-1 min-w-0 bg-base-950 border border-base-700 rounded px-2.5 py-1.5 text-[14px] text-base-200 outline-none focus:border-base-500 transition-colors font-sans"
+          placeholder="Describe injuries..."
           value={inp}
           onChange={(e) => setInp(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && send()}
@@ -101,7 +101,7 @@ export function Chat({ msgs, onSend, loading }: Props) {
         <button
           onClick={send}
           disabled={loading}
-          className="bg-base-700 hover:bg-base-600 disabled:opacity-40 transition-colors text-base-300 px-4 rounded text-[15px] font-medium"
+          className="bg-base-700 hover:bg-base-600 disabled:opacity-40 transition-colors text-base-300 px-3 rounded text-[13px] font-medium shrink-0"
         >
           SEND
         </button>

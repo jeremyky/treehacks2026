@@ -27,7 +27,7 @@ export function InjuryReport({ medical }: Props) {
         {medical ? (
           <div className="text-[16px] text-base-200 leading-relaxed">{medical.injuryReport}</div>
         ) : (
-          <div className="text-[16px] text-base-500 italic">Awaiting victim report...</div>
+          <div className="text-[16px] text-base-500 italic">Awaiting medical report...</div>
         )}
       </div>
     </div>
