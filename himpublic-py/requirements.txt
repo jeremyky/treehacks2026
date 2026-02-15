@@ -1,2 +1,22 @@
-# HIM Public orchestrator - minimal deps (stdlib only for now)
+# HIM Public orchestrator
 # For editable install: pip install -e .
+
+# Core
+ultralytics>=8.1.0   # YOLOv8 + YOLO-World open-vocab detection
+opencv-python>=4.8.0
+numpy>=1.24.0
+requests>=2.31.0
+
+# Server / orchestrator
+fastapi>=0.100.0
+uvicorn>=0.22.0
+
+# Audio
+SpeechRecognition>=3.10.0
+
+# Optional: TTS
+pyttsx3>=2.90
+
+# Optional: LLM
+openai>=1.0.0
+python-dotenv>=1.0.0

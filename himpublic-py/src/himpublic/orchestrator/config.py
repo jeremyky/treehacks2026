@@ -57,6 +57,7 @@ def load_config(
     search_max_audio_retries: int | None = None,
     search_approach_area_target: float | None = None,
     search_evidence_dir: str | None = None,
+    search_target: str | None = None,
 ) -> OrchestratorConfig:
     """Load config. CLI/args override env vars."""
     def _str(k: str, d: str, override: str | None) -> str:
@@ -110,6 +111,7 @@ def load_config(
         search_max_audio_retries=_int("HIMPUBLIC_SEARCH_MAX_AUDIO_RETRIES", 3, search_max_audio_retries),
         search_approach_area_target=_float("HIMPUBLIC_SEARCH_APPROACH_AREA", 0.20, search_approach_area_target),
         search_evidence_dir=_str("HIMPUBLIC_SEARCH_EVIDENCE_DIR", "data/search_evidence", search_evidence_dir),
+        search_target=_str("HIMPUBLIC_SEARCH_TARGET", "rubble", search_target),
     )
 
 
@@ -199,3 +201,14 @@ class OrchestratorConfig:
     search_no_detection_rescan_s: float = 8.0
     # Evidence output directory
     search_evidence_dir: str = "data/search_evidence"
+
+    # Search target: "person" (COCO person class) or "rubble" (open-vocab + QR + COCO fallback)
+    search_target: str = "rubble"
+
+    # Open-vocab rubble detection prompts (YOLO-World text prompts)
+    # These are the text descriptions that YOLO-World will search for in each frame.
+    rubble_prompts: tuple[str, ...] = (
+        "cardboard box", "amazon box", "package", "box",
+        "debris", "rubble", "crate", "wooden pallet",
+        "broken concrete", "pile of bricks",
+    )

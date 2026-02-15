@@ -36,6 +36,7 @@ class Action(Enum):
     WAIT = "wait"
     ASK = "ask"
     SAY = "say"
+    WAVE = "wave"  # hand wave gesture (used to signal rubble removal action)
 
 
 @dataclass
@@ -141,147 +142,55 @@ class LLMPolicy:
         num_persons = len(obs.persons)
         has_person = num_persons >= 1
 
-        # --- SEARCH_LOCALIZE: vocal search → ask "where is the person?" (retry twice) → fallback basic rotating search
+        # --- SEARCH_LOCALIZE: scan for rubble/debris, announce when found
         if phase == Phase.SEARCH_LOCALIZE.value:
-            # If camera already sees a person with decent confidence → transition out
-            if has_person and obs.confidence >= 0.5:
+            # If camera sees an object (rubble) with decent confidence → transition to DEBRIS_ASSESSMENT
+            if has_person and obs.confidence >= 0.3:
+                detected_name = obs.persons[0].cls_name if obs.persons else "debris"
                 return Decision(
-                    action=Action.STOP,
+                    action=Action.SAY,
                     params={"search_sub_phase": "found"},
-                    say="Person detected ahead. Moving to approach.",
+                    say=f"I see rubble ahead. It looks like {detected_name}. Let me take a closer look.",
                     wait_for_response_s=None,
-                    mode=Phase.APPROACH_CONFIRM.value,
+                    mode=Phase.DEBRIS_ASSESSMENT.value,
                     confidence=obs.confidence,
                 )
 
             # Sub-phase state machine within SEARCH_LOCALIZE
             search_sub = conversation_state.get("search_sub_phase", "announce")
-            search_ask_retries = int(conversation_state.get("search_ask_retries", 0))
-            pending_id = conversation_state.get("pending_question_id")
-            pending_asked_at = conversation_state.get("pending_question_asked_at")
             now = float(conversation_state.get("now") or 0.0)
-            wait_window_s = 12.0  # seconds to wait for someone to respond to "where are you?"
 
-            # --- Sub-phase 1: "announce" – say "Looking for person" out loud (once)
+            # --- Sub-phase 1: "announce" – say "Scanning for rubble" out loud (once)
             if search_sub == "announce":
                 return Decision(
                     action=Action.SAY,
-                    params={"search_sub_phase": "ask_location", "search_ask_retries": 0},
-                    say="Looking for a person. If anyone can hear me, please call out or make a noise.",
+                    params={"search_sub_phase": "scanning"},
+                    say="Scanning the area for rubble and debris. Looking around now.",
                     wait_for_response_s=None,
                     mode=Phase.SEARCH_LOCALIZE.value,
                     confidence=0.5,
                 )
 
-            # --- Sub-phase 2: "ask_location" – ask "where is the person?" and listen
-            if search_sub == "ask_location":
-                # First time or after retry acknowledgment → emit ASK
-                if not pending_id:
-                    return Decision(
-                        action=Action.ASK,
-                        params={
-                            "set_pending_question": True,
-                            "pending_question_id": "search_where",
-                            "pending_question_text": "Where are you? Can you describe your location?",
-                            "current_question_key": "search_location_hint",
-                            "search_sub_phase": "ask_location",
-                            "search_ask_retries": search_ask_retries,
-                            "last_prompt": "Where are you? Can you describe your location?",
-                            "pending_question_retries": search_ask_retries,
-                        },
-                        say="Where are you? Can you describe your location?",
-                        wait_for_response_s=wait_window_s,
-                        mode=Phase.SEARCH_LOCALIZE.value,
-                        confidence=0.5,
-                    )
-
-                # Got a response → acknowledge and start moving toward them
-                if response is not None and response.strip():
-                    return Decision(
-                        action=Action.SAY,
-                        params={
-                            "search_sub_phase": "basic_search",
-                            "clear_pending_question": True,
-                            "clear_last_response": True,
-                            "search_ask_retries": 0,
-                        },
-                        say=f"Copy that. I heard: {response.strip()[:60]}. Searching in that direction now.",
-                        wait_for_response_s=None,
-                        mode=Phase.SEARCH_LOCALIZE.value,
-                        confidence=0.6,
-                    )
-
-                # Still waiting for response
-                if pending_asked_at is not None:
-                    elapsed = now - pending_asked_at if now else 0.0
-                    if elapsed < wait_window_s:
-                        return Decision(
-                            action=Action.WAIT,
-                            params={},
-                            say=None,
-                            wait_for_response_s=None,
-                            mode=Phase.SEARCH_LOCALIZE.value,
-                            confidence=0.4,
-                        )
-
-                    # Timeout → retry up to 2 times total
-                    if search_ask_retries < 2:
-                        retry_say = "I didn't hear anything. If you can hear me, please call out!" if search_ask_retries == 0 else "Last try. Can anyone hear me? Make any sound if you can!"
-                        return Decision(
-                            action=Action.ASK,
-                            params={
-                                "set_pending_question": True,
-                                "pending_question_id": "search_where",
-                                "pending_question_text": retry_say,
-                                "current_question_key": "search_location_hint",
-                                "search_sub_phase": "ask_location",
-                                "search_ask_retries": search_ask_retries + 1,
-                                "last_prompt": retry_say,
-                                "pending_question_retries": search_ask_retries + 1,
-                            },
-                            say=retry_say,
-                            wait_for_response_s=wait_window_s,
-                            mode=Phase.SEARCH_LOCALIZE.value,
-                            confidence=0.4,
-                        )
-
-                    # Exhausted retries → fall back to basic search
-                    return Decision(
-                        action=Action.SAY,
-                        params={
-                            "search_sub_phase": "basic_search",
-                            "clear_pending_question": True,
-                            "search_ask_retries": 0,
-                        },
-                        say="No response heard. Beginning visual search pattern.",
-                        wait_for_response_s=None,
-                        mode=Phase.SEARCH_LOCALIZE.value,
-                        confidence=0.5,
-                    )
-
-            # --- Sub-phase 3: "basic_search" – rotate/scan, optionally use LLM
-            if search_sub == "basic_search" or search_sub == "found":
-                validated = validate_llm_proposal(llm_proposal)
-                if validated is not None and validated.get("confidence", 0) >= 0.6:
-                    return _decision_from_llm_proposal(validated, phase)
-                # Default: rotate slowly looking for a person
+            # --- Sub-phase 2: "scanning" – keep looking, periodically announce
+            if search_sub == "scanning":
+                # Default: wait and keep scanning
                 return Decision(
-                    action=Action.ROTATE_RIGHT,
-                    params={"duration_s": 0.5, "search_sub_phase": "basic_search"},
+                    action=Action.WAIT,
+                    params={"search_sub_phase": "scanning"},
                     say=None,
                     wait_for_response_s=None,
                     mode=Phase.SEARCH_LOCALIZE.value,
-                    confidence=0.5,
+                    confidence=0.3,
                 )
 
-            # Fallback for unknown sub-phase
+            # Fallback
             return Decision(
-                action=Action.ROTATE_RIGHT,
-                params={"duration_s": 0.5, "search_sub_phase": "basic_search"},
+                action=Action.WAIT,
+                params={"search_sub_phase": "scanning"},
                 say=None,
                 wait_for_response_s=None,
                 mode=Phase.SEARCH_LOCALIZE.value,
-                confidence=0.5,
+                confidence=0.3,
             )
 
         # --- APPROACH_CONFIRM: navigate, re-detect, confirm. Exit: standoff (centered + high conf) → SCENE_SAFETY_TRIAGE
@@ -333,14 +242,42 @@ class LLMPolicy:
                 confidence=obs.confidence,
             )
 
-        # --- DEBRIS_ASSESSMENT: rubble detect, movable vs not. Exit: access improved | not movable → INJURY
+        # --- DEBRIS_ASSESSMENT: wave hand to signal rubble removal, then transition to communicate
         if phase == Phase.DEBRIS_ASSESSMENT.value:
+            search_sub = conversation_state.get("search_sub_phase", "assess_announce")
+            now = float(conversation_state.get("now") or 0.0)
+            phase_entered = conversation_state.get("phase_entered_at") or now
+            elapsed_in_phase = now - phase_entered if now and phase_entered else 0.0
+
+            # First: announce assessment
+            if search_sub != "wave_done" and elapsed_in_phase < 2.0:
+                return Decision(
+                    action=Action.SAY,
+                    params={"search_sub_phase": "do_wave"},
+                    say="I found debris blocking the area. Let me try to clear it.",
+                    wait_for_response_s=None,
+                    mode=Phase.DEBRIS_ASSESSMENT.value,
+                    confidence=obs.confidence,
+                )
+
+            # Then: wave hand (removing rubble gesture)
+            if search_sub == "do_wave":
+                return Decision(
+                    action=Action.WAVE,
+                    params={"search_sub_phase": "wave_done", "wave_hand": "right", "wave_cycles": 2},
+                    say="Clearing rubble now.",
+                    wait_for_response_s=None,
+                    mode=Phase.DEBRIS_ASSESSMENT.value,
+                    confidence=obs.confidence,
+                )
+
+            # After wave: announce completion and transition to ASSIST_COMMUNICATE
             return Decision(
-                action=Action.WAIT,
-                params={},
-                say=None,
+                action=Action.SAY,
+                params={"search_sub_phase": "announce"},
+                say="I have cleared some of the rubble. Let me assess the situation and report to the team.",
                 wait_for_response_s=None,
-                mode=Phase.INJURY_DETECTION.value,
+                mode=Phase.ASSIST_COMMUNICATE.value,
                 confidence=obs.confidence,
             )
 

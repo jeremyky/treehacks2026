@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                    help="Print each decision to terminal: camera (persons, conf) + what was heard -> action, say, listen")
     p.add_argument("--robot-bridge-url", type=str, default="http://192.168.10.102:9090",
                    help="Robot Bridge server URL (for --io robot). Default: http://192.168.10.102:9090")
+    p.add_argument("--search-target", choices=["person", "rubble"], default="rubble",
+                   help="What to search for: 'person' (COCO person class) or 'rubble' (any object). Default: rubble")
     return p.parse_args()
 
 
@@ -98,6 +100,7 @@ def main() -> int:
         log_level=args.log_level,
         debug_decisions=getattr(args, "debug_decisions", False),
         robot_bridge_url=getattr(args, "robot_bridge_url", None),
+        search_target=getattr(args, "search_target", "rubble"),
     )
     setup_logging(config.log_level)
 

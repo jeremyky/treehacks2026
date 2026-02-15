@@ -50,12 +50,143 @@ logger = logging.getLogger("robot_bridge")
 # ---------------------------------------------------------------------------
 SDK_AVAILABLE = False
 _sdk = None
+_loco_client = None  # B1LocoClient instance (initialized lazily)
+_sdk_initialized = False
 try:
     import booster_robotics_sdk_python as _sdk_mod
     _sdk = _sdk_mod
     SDK_AVAILABLE = True
 except ImportError:
     pass
+
+
+def _ensure_sdk_init(network_interface: str = "") -> bool:
+    """Initialize ChannelFactory + B1LocoClient once.  Returns True on success."""
+    global _loco_client, _sdk_initialized
+    if _sdk_initialized:
+        return _loco_client is not None
+    _sdk_initialized = True
+    if not SDK_AVAILABLE or _sdk is None:
+        logger.warning("SDK not available — hand/motion commands disabled")
+        return False
+    try:
+        logger.info("Initializing SDK: domain_id=0, network_interface=%r", network_interface)
+        _sdk.ChannelFactory.Instance().Init(0, network_interface)
+        _loco_client = _sdk.B1LocoClient()
+        _loco_client.Init()
+        logger.info("Booster SDK initialized (ChannelFactory + B1LocoClient)")
+        return True
+    except Exception as e:
+        import traceback
+        logger.error("SDK init failed: %s\n%s", e, traceback.format_exc())
+        _loco_client = None
+        return False
+
+
+def _discover_hand_type():
+    """Discover available B1HandType enum value from the robot's SDK version."""
+    if _sdk is None:
+        return None
+    # Try known hand type enums — the robot tells us which via the error signature
+    for name in ["kInspireHand", "kDexHand", "kGripperHand"]:
+        val = getattr(_sdk.B1HandType, name, None)
+        if val is not None:
+            logger.info("Using hand type: B1HandType.%s", name)
+            return val
+    # Last resort: try enum value 0
+    try:
+        val = _sdk.B1HandType(0)
+        logger.info("Using hand type: B1HandType(%d) = %s", 0, val)
+        return val
+    except Exception:
+        pass
+    logger.error("Could not discover any B1HandType value!")
+    return None
+
+
+_HAND_TYPE = None  # resolved lazily
+
+
+def _get_hand_type():
+    global _HAND_TYPE
+    if _HAND_TYPE is None:
+        _HAND_TYPE = _discover_hand_type()
+    return _HAND_TYPE
+
+
+def _hand_open_fingers(hand_index) -> int:
+    """Open all fingers (paper gesture) on the given hand.  Returns SDK error code.
+
+    Robot SDK signature (from error):
+      ControlDexterousHand(finger_params, hand_index, hand_type) -> int
+    Each finger: DexterousFingerParameter with seq, angle (1000=open), force, speed.
+    """
+    if _loco_client is None or _sdk is None:
+        return -1
+    hand_type = _get_hand_type()
+    if hand_type is None:
+        logger.error("Cannot control hand: no valid B1HandType found")
+        return -1
+    finger_params = []
+    # finger sequences: 0,1,2,3,3,5  (from SDK b1_loco_example_client.py hand_paper)
+    for seq in [0, 1, 2, 3, 3, 5]:
+        fp = _sdk.DexterousFingerParameter()
+        fp.seq = seq
+        fp.angle = 1000  # fully open
+        fp.force = 200
+        fp.speed = 800
+        finger_params.append(fp)
+    return _loco_client.ControlDexterousHand(finger_params, hand_index, hand_type)
+
+
+def _hand_close_fingers(hand_index) -> int:
+    """Close all fingers (rock/fist gesture) on the given hand.  Returns SDK error code.
+
+    Robot SDK signature (from error):
+      ControlDexterousHand(finger_params, hand_index, hand_type) -> int
+    Each finger: DexterousFingerParameter with seq, angle (0=closed), force, speed.
+    """
+    if _loco_client is None or _sdk is None:
+        return -1
+    hand_type = _get_hand_type()
+    if hand_type is None:
+        logger.error("Cannot control hand: no valid B1HandType found")
+        return -1
+    finger_params = []
+    for seq in [0, 1, 2, 3, 3, 5]:
+        fp = _sdk.DexterousFingerParameter()
+        fp.seq = seq
+        fp.angle = 0  # fully closed
+        fp.force = 200
+        fp.speed = 800
+        finger_params.append(fp)
+    return _loco_client.ControlDexterousHand(finger_params, hand_index, hand_type)
+
+
+def do_wave(hand: str = "right", cycles: int = 2) -> dict:
+    """Perform a wave gesture: open-close-open the hand.  Safe, no walking."""
+    if not _ensure_sdk_init():
+        return {"status": "error", "detail": "SDK not initialized"}
+
+    hand_index = _sdk.B1HandIndex.kRightHand if hand == "right" else _sdk.B1HandIndex.kLeftHand
+    errors = []
+    for i in range(cycles):
+        res = _hand_open_fingers(hand_index)
+        if res != 0:
+            errors.append(f"open_{i}={res}")
+        time.sleep(0.4)
+        res = _hand_close_fingers(hand_index)
+        if res != 0:
+            errors.append(f"close_{i}={res}")
+        time.sleep(0.4)
+    # End with hand open (friendly)
+    res = _hand_open_fingers(hand_index)
+    if res != 0:
+        errors.append(f"final_open={res}")
+
+    if errors:
+        return {"status": "partial", "hand": hand, "cycles": cycles, "errors": errors}
+    return {"status": "ok", "hand": hand, "cycles": cycles}
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +517,7 @@ def speak_espeak(text: str) -> bool:
     """
     try:
         espeak_proc = subprocess.Popen(
-            ["espeak", "--stdout", "-a", "200", text],
+            ["espeak", "--stdout", "-a", "200", "-s", "140", text],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -583,12 +714,130 @@ def create_app(camera: CameraManager, allow_motion: bool = False) -> FastAPI:
         logger.info("VELOCITY cmd: vx=%.3f wz=%.3f (stub)", vx, wz)
         return {"status": "ok", "vx": vx, "wz": wz, "note": "SDK motion stub"}
 
+    # ── SDK diagnostics ────────────────────────────────────────────────
+    @app.get("/sdk_info")
+    async def sdk_info():
+        info: dict[str, Any] = {"sdk_available": SDK_AVAILABLE}
+        if SDK_AVAILABLE and _sdk is not None:
+            # List all B1HandType enum members
+            try:
+                hand_types = {k: str(getattr(_sdk.B1HandType, k))
+                              for k in dir(_sdk.B1HandType)
+                              if k.startswith("k")}
+                info["B1HandType_members"] = hand_types
+            except Exception as e:
+                info["B1HandType_error"] = str(e)
+            # List B1HandIndex members
+            try:
+                hand_indices = {k: str(getattr(_sdk.B1HandIndex, k))
+                                for k in dir(_sdk.B1HandIndex)
+                                if k.startswith("k")}
+                info["B1HandIndex_members"] = hand_indices
+            except Exception as e:
+                info["B1HandIndex_error"] = str(e)
+            info["resolved_hand_type"] = str(_get_hand_type())
+            info["sdk_init"] = _sdk_initialized
+            info["loco_client_ok"] = _loco_client is not None
+        return info
+
+    # ── robot mode: get / set ──────────────────────────────────────────
+    @app.get("/mode")
+    async def get_mode():
+        """Get the current robot mode (DAMP, PREP, WALK, CUSTOM, etc.)."""
+        if not _ensure_sdk_init():
+            return JSONResponse({"error": "SDK not initialized"}, status_code=503)
+        try:
+            gm = _sdk.GetModeResponse()
+            res = _loco_client.GetMode(gm)
+            if res == 0:
+                # Map mode int to name for readability
+                mode_names = {0: "DAMP", 1: "PREP", 2: "WALK", 3: "CUSTOM"}
+                mode_val = int(gm.mode) if hasattr(gm.mode, '__int__') else gm.mode
+                return {
+                    "status": "ok",
+                    "mode": str(gm.mode),
+                    "mode_value": mode_val,
+                    "mode_name": mode_names.get(mode_val, f"UNKNOWN({mode_val})"),
+                }
+            return JSONResponse({"error": f"GetMode returned {res}"}, status_code=503)
+        except Exception as e:
+            import traceback
+            return JSONResponse({"error": str(e), "traceback": traceback.format_exc()}, status_code=500)
+
+    @app.post("/mode")
+    async def set_mode(request: Request):
+        """Change robot mode.  Body: {"mode": "prep"|"walk"|"damp"|"custom"}
+
+        SAFETY: Only prep and damp are allowed without --allow-motion.
+        Walk and custom require --allow-motion flag.
+        """
+        if not _ensure_sdk_init():
+            return JSONResponse({"error": "SDK not initialized"}, status_code=503)
+        body = await request.json()
+        target = (body.get("mode") or "").strip().lower()
+
+        mode_map = {
+            "damp": _sdk.RobotMode.kDamping,
+            "prep": _sdk.RobotMode.kPrepare,
+            "walk": _sdk.RobotMode.kWalking,
+            "custom": _sdk.RobotMode.kCustom,
+        }
+        if target not in mode_map:
+            return JSONResponse(
+                {"error": f"Unknown mode '{target}'. Use: damp, prep, walk, custom"},
+                status_code=400,
+            )
+
+        # Safety gate: walk and custom can move the robot
+        if target in ("walk", "custom") and not allow_motion:
+            return JSONResponse(
+                {"error": f"Mode '{target}' requires --allow-motion flag on bridge startup"},
+                status_code=403,
+            )
+
+        try:
+            logger.warning("MODE CHANGE requested: -> %s", target.upper())
+            res = _loco_client.ChangeMode(mode_map[target])
+            if res == 0:
+                return {"status": "ok", "mode": target, "detail": f"Changed to {target.upper()}"}
+            return JSONResponse(
+                {"error": f"ChangeMode returned {res}", "target": target},
+                status_code=503,
+            )
+        except Exception as e:
+            import traceback
+            return JSONResponse({"error": str(e), "traceback": traceback.format_exc()}, status_code=500)
+
+    # ── hand wave (SAFE — no walking, just fingers) ──────────────────
+    @app.post("/wave")
+    async def post_wave(request: Request):
+        try:
+            body = await request.json()
+            hand = body.get("hand", "right")
+            cycles = int(body.get("cycles", 2))
+            cycles = max(1, min(cycles, 5))  # clamp to [1, 5]
+            logger.info("WAVE cmd: hand=%s cycles=%d", hand, cycles)
+            result = do_wave(hand=hand, cycles=cycles)
+            status_code = 200 if result["status"] in ("ok", "partial") else 503
+            return JSONResponse(result, status_code=status_code)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error("Wave endpoint error: %s\n%s", e, tb)
+            return JSONResponse({"error": str(e), "traceback": tb}, status_code=500)
+
     # ── emergency stop (ALWAYS allowed) ─────────────────────────────
     @app.post("/stop")
     async def post_stop():
         logger.warning("E-STOP requested")
-        # TODO: Wire SDK ChangeMode(kDamping) here
-        return {"status": "ok", "action": "stop", "note": "SDK stop stub"}
+        if _ensure_sdk_init() and _loco_client is not None and _sdk is not None:
+            try:
+                res = _loco_client.ChangeMode(_sdk.RobotMode.kDamping)
+                return {"status": "ok", "action": "stop", "sdk_result": res}
+            except Exception as e:
+                logger.error("SDK stop failed: %s", e)
+                return {"status": "error", "detail": str(e)}
+        return {"status": "ok", "action": "stop", "note": "SDK not available — software stop only"}
 
     return app
 

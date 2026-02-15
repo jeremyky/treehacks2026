@@ -400,9 +400,14 @@ class OrchestratorAgent:
             bridge = RobotBridgeClient(base_url=config.robot_bridge_url)
             self._video_source = BridgeVideoSource(bridge)
             self._audio_io = BridgeAudioIO(bridge, use_local_asr=config.use_mic)
+            # Detect rubble via open-vocab YOLO-World + QR + COCO fallback
+            search_target = getattr(config, "search_target", "rubble")
+            rubble_prompts = list(getattr(config, "rubble_prompts", []))
             self._person_detector = PersonDetector(
                 model_path=config.yolo_model,
                 threshold=config.detection_threshold,
+                target=search_target,
+                rubble_prompts=rubble_prompts or None,
             )
             self._frame_store = LatestFrameStore()
             self._ring_buffer = RingBuffer(
@@ -423,9 +428,13 @@ class OrchestratorAgent:
         elif config.io_mode == "local":
             self._video_source = _create_video_source(config)
             self._audio_io = _create_audio_io(config)
+            search_target = getattr(config, "search_target", "rubble")
+            rubble_prompts = list(getattr(config, "rubble_prompts", []))
             self._person_detector = PersonDetector(
                 model_path=config.yolo_model,
                 threshold=config.detection_threshold,
+                target=search_target,
+                rubble_prompts=rubble_prompts or None,
             )
             self._frame_store = LatestFrameStore()
             self._ring_buffer = RingBuffer(
@@ -478,7 +487,7 @@ class OrchestratorAgent:
         self._state.degraded_mode = not video_ok
         self._state.phase = Phase.SEARCH_LOCALIZE.value
         self._state.phase_entered_at = time.monotonic()
-        self._state.pending_phase_announcement = PHASE_ANNOUNCE.get(Phase.SEARCH_LOCALIZE, "Looking for person.")
+        self._state.pending_phase_announcement = PHASE_ANNOUNCE.get(Phase.SEARCH_LOCALIZE, "Scanning for rubble.")
         logger.info("Phase: %s – %s (ready=%s, degraded=%s)",
                     Phase.SEARCH_LOCALIZE.value, PHASE_LABELS.get(Phase.SEARCH_LOCALIZE, "Search"),
                     self._state.boot_ready, self._state.degraded_mode)
@@ -513,45 +522,11 @@ class OrchestratorAgent:
         if phase != Phase.SEARCH_LOCALIZE.value:
             return None
 
-        logger.info("Running SearchForPersonPhase (integrated)")
-        search_cfg = self._build_search_phase_config()
-
-        # Build video source: use the existing one
-        video = self._video_source
-
-        # Build robot actions wrapper
-        robot_actions = SearchRobotActions(
-            mode=search_cfg.mode,
-            robot=self._robot,
-        )
-
-        event_logger = SearchEventLogger("logs/search_events.jsonl")
-
-        search_phase = SearchForPersonPhase(
-            config=search_cfg,
-            video_source=video,
-            robot_actions=robot_actions,
-            event_logger=event_logger,
-            person_detector=self._person_detector,
-        )
-
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, search_phase.run)
-
-        logger.info(
-            "SearchForPersonPhase result: found=%s confidence=%.3f heading=%.0f reason=%s",
-            result.found, result.confidence, result.chosen_heading_deg, result.reason,
-        )
-
-        if result.found:
-            # Transition to APPROACH_CONFIRM
-            self._state.phase = Phase.APPROACH_CONFIRM.value
-            self._state.phase_entered_at = time.monotonic()
-            self._state.pending_phase_announcement = PHASE_ANNOUNCE.get(Phase.APPROACH_CONFIRM, "Approaching.")
-            self._state.person_found_emitted = True
-            logger.info("Search phase found person — transitioning to APPROACH_CONFIRM")
-        else:
-            logger.info("Search phase did not find person (reason: %s), continuing with policy loop", result.reason)
+        # Skip the blocking search phase — use the perception loop + policy instead
+        # (The old SearchForPersonPhase was for audio-based person search.
+        #  For rubble search, we rely on the YOLO perception loop to detect objects.)
+        logger.info("Rubble search mode: skipping blocking SearchForPersonPhase, using perception loop + policy")
+        return None  # No blocking search result
 
         return result
 
@@ -577,11 +552,12 @@ class OrchestratorAgent:
             if obs.persons and obs.confidence >= self.config.detection_threshold:
                 if not self._state.person_found_emitted:
                     self._state.person_found_emitted = True
+                    det_names = [d.cls_name for d in obs.persons[:3]]
                     await loop.run_in_executor(
                         None,
                         lambda: self._event_manager.emit(
                             EventType.FOUND_PERSON,
-                            {"num_persons": len(obs.persons), "confidence": obs.confidence},
+                            {"num_detections": len(obs.persons), "confidence": obs.confidence, "classes": det_names},
                         ),
                     )
             await asyncio.sleep(0.02)
@@ -735,8 +711,9 @@ class OrchestratorAgent:
                 await asyncio.sleep(0.1)
             self._robot.stop()
             return
-        # Local: AudioIO for SAY/ASK, no robot motion. Post robot_said and robot_status to command center.
+        # Local/Robot: AudioIO for SAY/ASK, wave via bridge. Post robot_said and robot_status to command center.
         last_spoke: str | None = None
+        last_wave_phase: str | None = None  # track wave to avoid repeating
         while not self._stop_event.is_set():
             # Post phase to comms chat only (do not speak phase out loud)
             pending = self._state.pending_phase_announcement
@@ -752,7 +729,43 @@ class OrchestratorAgent:
                         "text": pending,
                     })
             decision = await self._state.get_decision()
-            if decision and decision.say and decision.say != last_spoke:
+
+            # Handle WAVE action: trigger robot hand wave via bridge
+            if decision and decision.action == Action.WAVE:
+                wave_key = f"{self._state.phase}_{decision.params.get('search_sub_phase', '')}"
+                if wave_key != last_wave_phase:
+                    last_wave_phase = wave_key
+                    # Speak first if there's something to say
+                    if decision.say and decision.say != last_spoke:
+                        if self._audio_io:
+                            self._audio_io.speak(decision.say)
+                        if self._cc_client and self._cc_client._enabled:
+                            self._cc_client.post_event({"event": "robot_said", "text": decision.say})
+                        last_spoke = decision.say
+                    # Execute wave via bridge
+                    bridge = getattr(self, "_bridge_client", None)
+                    if bridge is not None:
+                        wave_hand = decision.params.get("wave_hand", "right")
+                        wave_cycles = int(decision.params.get("wave_cycles", 2))
+                        logger.info("Executing WAVE: hand=%s cycles=%d", wave_hand, wave_cycles)
+                        loop = asyncio.get_event_loop()
+                        ok = await loop.run_in_executor(
+                            None,
+                            lambda: bridge.wave(hand=wave_hand, cycles=wave_cycles),
+                        )
+                        if self._cc_client and self._cc_client._enabled:
+                            self._cc_client.post_event({
+                                "event": "robot_action",
+                                "action": "wave",
+                                "hand": wave_hand,
+                                "cycles": wave_cycles,
+                                "success": ok,
+                            })
+                        logger.info("WAVE result: %s", "ok" if ok else "failed")
+                    else:
+                        logger.info("WAVE action (no bridge — demo mode)")
+
+            elif decision and decision.say and decision.say != last_spoke:
                 if self._audio_io:
                     self._audio_io.speak(decision.say)
                 if self._cc_client and self._cc_client._enabled:
@@ -762,6 +775,7 @@ class OrchestratorAgent:
                     self._state.last_asked_at = time.monotonic()
             if decision is None:
                 last_spoke = None
+                last_wave_phase = None
             await asyncio.sleep(0.1)
 
     async def _preview_loop(self) -> None:

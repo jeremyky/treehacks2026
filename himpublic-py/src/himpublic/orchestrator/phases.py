@@ -54,30 +54,30 @@ class Phase(Enum):
 # Human-readable labels and short behavior hints for telemetry/UI
 PHASE_LABELS: dict[Phase, str] = {
     Phase.BOOT: "Boot / Self-check",
-    Phase.SEARCH_LOCALIZE: "Search & Localize Human",
-    Phase.APPROACH_CONFIRM: "Approach & Confirm",
+    Phase.SEARCH_LOCALIZE: "Search & Localize Rubble",
+    Phase.APPROACH_CONFIRM: "Approach & Confirm Rubble",
     Phase.SCENE_SAFETY_TRIAGE: "Scene Safety & Triage Setup",
-    Phase.DEBRIS_ASSESSMENT: "Debris Assessment & Removal Support",
+    Phase.DEBRIS_ASSESSMENT: "Debris Assessment & Removal",
     Phase.INJURY_DETECTION: "Injury Detection & Documentation",
-    Phase.ASSIST_COMMUNICATE: "Assist & Communicate (Triage)",
+    Phase.ASSIST_COMMUNICATE: "Communicate & Report Status",
     Phase.SCAN_CAPTURE: "Scan & Capture Images",
     Phase.REPORT_SEND: "Send Report to Command Center",
-    Phase.HANDOFF_ESCORT: "Handoff / Escort / Continue Search",
+    Phase.HANDOFF_ESCORT: "Handoff / Continue Search",
     Phase.DONE: "Done",
 }
 
 # Short spoken announcements when entering each phase (robot states out loud)
 PHASE_ANNOUNCE: dict[Phase, str] = {
     Phase.BOOT: "Booting up. Running self-check.",
-    Phase.SEARCH_LOCALIZE: "Looking for person.",
-    Phase.APPROACH_CONFIRM: "Person detected. Approaching.",
+    Phase.SEARCH_LOCALIZE: "Scanning area for rubble and debris.",
+    Phase.APPROACH_CONFIRM: "I see something ahead. Moving closer to confirm.",
     Phase.SCENE_SAFETY_TRIAGE: "Checking scene safety.",
-    Phase.DEBRIS_ASSESSMENT: "Assessing debris.",
-    Phase.INJURY_DETECTION: "Documenting injuries.",
-    Phase.ASSIST_COMMUNICATE: "Figuring out your medical condition. I will ask a few questions.",
-    Phase.SCAN_CAPTURE: "Capturing images for the medics.",
+    Phase.DEBRIS_ASSESSMENT: "I found rubble. Assessing the debris now.",
+    Phase.INJURY_DETECTION: "Documenting the scene.",
+    Phase.ASSIST_COMMUNICATE: "Reporting what I found. I will describe the situation.",
+    Phase.SCAN_CAPTURE: "Capturing images of the debris for the team.",
     Phase.REPORT_SEND: "Sending report to command center.",
-    Phase.HANDOFF_ESCORT: "Report sent. Staying with you. Tell me if anything changes.",
+    Phase.HANDOFF_ESCORT: "Report sent. Standing by for next task.",
     Phase.DONE: "Mission complete. Standing by.",
 }
 

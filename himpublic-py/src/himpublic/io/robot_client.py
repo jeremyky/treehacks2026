@@ -183,6 +183,21 @@ class RobotBridgeClient:
             logger.warning("stop failed: %s", e)
             return False
 
+    def wave(self, hand: str = "right", cycles: int = 2) -> bool:
+        """POST /wave — safe hand wave gesture (no walking).  Returns True on success."""
+        try:
+            resp = requests.post(
+                f"{self._base_url}/wave",
+                json={"hand": hand, "cycles": cycles},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            return result.get("status") in ("ok", "partial")
+        except Exception as e:
+            logger.warning("wave failed: %s", e)
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Pipeline adapters
@@ -224,12 +239,15 @@ class BridgeAudioIO:
     def __init__(self, client: RobotBridgeClient, *, use_local_asr: bool = True) -> None:
         self._client = client
         self._use_local_asr = use_local_asr
+        self._last_speak_done: float = 0.0  # monotonic timestamp when last speak() finished
         logger.info("BridgeAudioIO: bridge at %s, local_asr=%s", client.base_url, use_local_asr)
 
     def speak(self, text: str) -> None:
-        """Play text through robot speaker via bridge."""
+        """Play text through robot speaker via bridge.  Blocks until TTS playback finishes."""
+        import time as _time
         logger.info("BridgeAudioIO.speak: %s", text[:80])
         ok = self._client.speak(text)
+        self._last_speak_done = _time.monotonic()
         if not ok:
             logger.warning("Bridge /speak failed — printing to console as fallback")
             print(f"[TTS-BRIDGE-FALLBACK] {text}", flush=True)
@@ -237,8 +255,22 @@ class BridgeAudioIO:
     def listen(self, timeout_s: float) -> str | None:
         """Record from robot mic, then run ASR locally.
 
+        Waits for TTS to finish + a 1s buffer before recording, so the robot
+        doesn't hear itself speaking.
+
         Returns transcript or None on timeout / no speech / failure.
         """
+        import time as _time
+
+        # Wait until at least 1s after the last speak() completed
+        if self._last_speak_done > 0:
+            since_speak = _time.monotonic() - self._last_speak_done
+            gap = 1.0  # seconds to wait after TTS finishes before recording
+            if since_speak < gap:
+                wait = gap - since_speak
+                logger.debug("Waiting %.1fs for TTS echo to clear before recording", wait)
+                _time.sleep(wait)
+
         logger.debug("BridgeAudioIO.listen(%.1fs) — recording from robot mic", timeout_s)
         print(f"[Listening] Recording from robot mic ({timeout_s:.0f}s)...", flush=True)
         wav_bytes = self._client.record(duration_s=timeout_s)

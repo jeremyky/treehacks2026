@@ -147,6 +147,19 @@ def main() -> int:
         print("FAIL: Recording empty — check ALSA devices on robot: arecord -l")
         failed += 1
 
+    # ── 6. Wave (hand gesture — safe, no walking) ──────────────────
+    print("\n" + "=" * 60)
+    print("STEP 6: POST /wave (hand gesture)")
+    print("=" * 60)
+    ok = client.wave(hand="right", cycles=2)
+    results["tests"]["wave"] = {"ok": ok}
+    if ok:
+        print("PASS: Wave gesture executed")
+        passed += 1
+    else:
+        print("FAIL: Wave failed — SDK may not be initialized on bridge")
+        failed += 1
+
     # ── Summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print(f"SMOKE TEST COMPLETE: {passed} passed, {failed} failed")

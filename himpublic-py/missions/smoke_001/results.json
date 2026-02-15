@@ -3,7 +3,7 @@
   "tests": {
     "health": {
       "status": "ok",
-      "uptime_s": 431.0,
+      "uptime_s": 10.8,
       "camera_ok": true,
       "camera_backend": "ros2",
       "camera_source": "ros2:/StereoNetNode/rectified_image",
@@ -15,7 +15,7 @@
       "sdk_available": true
     },
     "state": {
-      "timestamp": 1771112450.5380802,
+      "timestamp": 1771114068.7748406,
       "camera_ok": true,
       "camera_backend": "ros2",
       "allow_motion": false,
@@ -59,14 +59,17 @@
       "expected": 3
     },
     "speak": {
-      "ok": false,
+      "ok": true,
       "text": "TreeHacks robot bridge online. Smoke test in progress."
     },
     "record": {
       "size_bytes": 160044
     },
+    "wave": {
+      "ok": false
+    },
     "summary": {
-      "passed": 4,
+      "passed": 5,
       "failed": 1
     }
   }
