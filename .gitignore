@@ -1,7 +1,95 @@
-# Environment and secrets (never commit)
+# ═══════════════════════════════════════════════════════════════════════
+# Environment Variables & Secrets (NEVER COMMIT!)
+# ═══════════════════════════════════════════════════════════════════════
 .env
 .env.local
+.env.*.local
 *.env
+!.env.example
+!**/.env.example
 
-# Orchestrator logs (LLM decisions JSONL)
+# API keys and credentials
+**/secrets/
+**/credentials/
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+
+# ═══════════════════════════════════════════════════════════════════════
+# Logs & Generated Data
+# ═══════════════════════════════════════════════════════════════════════
 logs/
+*.log
+*.jsonl
+**/__pycache__/
+
+# ═══════════════════════════════════════════════════════════════════════
+# Generated Reports & Evidence (may contain sensitive data)
+# ═══════════════════════════════════════════════════════════════════════
+**/reports/
+**/data/
+**/artifacts/
+**/missions/*/results.json
+
+# ═══════════════════════════════════════════════════════════════════════
+# Large Model Files (download separately)
+# ═══════════════════════════════════════════════════════════════════════
+*.pt
+*.onnx
+*.tflite
+*.h5
+*.pb
+
+# ═══════════════════════════════════════════════════════════════════════
+# Large / generated files not needed in repo
+# ═══════════════════════════════════════════════════════════════════════
+# Compiled SDK / third-party libs (rebuild from source)
+booster_robotics_sdk/lib/
+booster_robotics_sdk/third_party/lib/
+# Generated report PDFs (reports/ already ignored; these cover if any were added earlier)
+**/reports/*.pdf
+
+# ═══════════════════════════════════════════════════════════════════════
+# Python
+# ═══════════════════════════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ═══════════════════════════════════════════════════════════════════════
+# Node / JavaScript
+# ═══════════════════════════════════════════════════════════════════════
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ═══════════════════════════════════════════════════════════════════════
+# IDE / Editor
+# ═══════════════════════════════════════════════════════════════════════
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ═══════════════════════════════════════════════════════════════════════
+# Build artifacts
+# ═══════════════════════════════════════════════════════════════════════
+*.o
+*.a
+*.d
+install/
+.context/

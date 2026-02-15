@@ -1,4 +1,0 @@
-{"id": "E1", "timestamp": 1771108300.4026291, "type": "image", "source": "camera", "file_path": "images/scene_overview_001.jpg", "confidence": 0.0, "summary": "Wide view of corridor and victim location", "model_metadata": {}}
-{"id": "E2", "timestamp": 1771108300.402744, "type": "image", "source": "camera", "file_path": "images/scene_overview_002.jpg", "confidence": 0.0, "summary": "Approach view", "model_metadata": {}}
-{"id": "E3", "timestamp": 1771108300.402821, "type": "image", "source": "camera", "file_path": "images/injury_forearm_001.jpg", "confidence": 0.0, "summary": "Left forearm possible laceration", "model_metadata": {}}
-{"id": "E4", "timestamp": 1707890200.0, "type": "audio", "source": "mic", "file_path": "", "confidence": 0.92, "summary": "My arm is bleeding. I can't move it much.", "model_metadata": {}}
