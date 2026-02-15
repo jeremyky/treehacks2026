@@ -129,7 +129,7 @@ class LLMPolicy:
         last_asked = conversation_state.get("last_asked_at")
         response = conversation_state.get("last_response")
 
-        if obs is None:
+        if obs is None and phase != Phase.ASSIST_COMMUNICATE.value:
             return Decision(
                 action=Action.WAIT,
                 params={},
@@ -139,8 +139,9 @@ class LLMPolicy:
                 confidence=0.0,
             )
 
-        num_persons = len(obs.persons)
+        num_persons = len(obs.persons) if obs else 0
         has_person = num_persons >= 1
+        _obs_conf = obs.confidence if obs else 0.5  # default for no-camera triage
 
         # --- SEARCH_LOCALIZE: scan for rubble/debris, announce when found
         if phase == Phase.SEARCH_LOCALIZE.value:
@@ -302,7 +303,7 @@ class LLMPolicy:
                     say="No response detected. I'll proceed with visual inspection only and send what I see to the command center.",
                     wait_for_response_s=None,
                     mode=Phase.SCAN_CAPTURE.value,
-                    confidence=obs.confidence,
+                    confidence=_obs_conf,
                 )
 
             response = conversation_state.get("last_response")
@@ -350,7 +351,7 @@ class LLMPolicy:
                         say=robot_say or "Thank you. I'm going to scan your body and capture a few images for the medics. Please stay still.",
                         wait_for_response_s=None,
                         mode=Phase.SCAN_CAPTURE.value,
-                        confidence=obs.confidence,
+                        confidence=_obs_conf,
                     )
 
                 # Robot says ack + next question in one turn
@@ -368,7 +369,7 @@ class LLMPolicy:
                         say=robot_say,
                         wait_for_response_s=wait_window_s,
                         mode=Phase.ASSIST_COMMUNICATE.value,
-                        confidence=obs.confidence,
+                        confidence=_obs_conf,
                     )
 
                 # No more questions but not complete (shouldn't happen normally)
@@ -378,7 +379,7 @@ class LLMPolicy:
                     say=robot_say,
                     wait_for_response_s=None,
                     mode=Phase.ASSIST_COMMUNICATE.value,
-                    confidence=obs.confidence,
+                    confidence=_obs_conf,
                 )
 
             # 2) Waiting for response: pending question set and no response yet
@@ -391,7 +392,7 @@ class LLMPolicy:
                         say=None,
                         wait_for_response_s=None,
                         mode=Phase.ASSIST_COMMUNICATE.value,
-                        confidence=obs.confidence,
+                        confidence=_obs_conf,
                     )
                 # Timeout: retry once or give up
                 if pending_retries < 1:
@@ -409,7 +410,7 @@ class LLMPolicy:
                         say=retry_phrase,
                         wait_for_response_s=wait_window_s,
                         mode=Phase.ASSIST_COMMUNICATE.value,
-                        confidence=obs.confidence,
+                        confidence=_obs_conf,
                     )
                 return Decision(
                     action=Action.SAY,
@@ -417,7 +418,7 @@ class LLMPolicy:
                     say="I'm not hearing you clearly. I will continue with visual documentation and send what I see.",
                     wait_for_response_s=None,
                     mode=Phase.SCAN_CAPTURE.value,
-                    confidence=obs.confidence,
+                    confidence=_obs_conf,
                 )
 
             # 3) No pending question and no response yet → ask first/next question via dialogue manager
@@ -434,24 +435,27 @@ class LLMPolicy:
                     say="Thank you. I'm going to scan your body and capture a few images for the medics. Please stay still.",
                     wait_for_response_s=None,
                     mode=Phase.SCAN_CAPTURE.value,
-                    confidence=obs.confidence,
+                    confidence=_obs_conf,
                 )
 
-            if next_q_key and next_q_text:
+            # If the LLM returned a robot utterance, ASK even if question_key is generic
+            effective_q_key = next_q_key or "initial"
+            effective_q_text = next_q_text or robot_say
+            if effective_q_text and robot_say:
                 return Decision(
                     action=Action.ASK,
                     params={
                         "set_pending_question": True,
-                        "pending_question_id": f"dm_{next_q_key}",
-                        "pending_question_text": next_q_text,
-                        "current_question_key": next_q_key,
-                        "last_prompt": next_q_text,
+                        "pending_question_id": f"dm_{effective_q_key}",
+                        "pending_question_text": effective_q_text,
+                        "current_question_key": effective_q_key,
+                        "last_prompt": effective_q_text,
                         "pending_question_retries": 0,
                     },
                     say=robot_say,
                     wait_for_response_s=wait_window_s,
                     mode=Phase.ASSIST_COMMUNICATE.value,
-                    confidence=obs.confidence,
+                    confidence=_obs_conf,
                 )
 
             return Decision(
@@ -460,7 +464,7 @@ class LLMPolicy:
                 say=None,
                 wait_for_response_s=None,
                 mode=Phase.ASSIST_COMMUNICATE.value,
-                confidence=obs.confidence,
+                confidence=_obs_conf,
             )
 
         # --- SCAN_CAPTURE: placeholder capture views; agent runs capture_image and sets images_captured

@@ -20,7 +20,10 @@ ALLOWED_ACTIONS = frozenset({
     "back_up", "wait", "ask", "say",
 })
 
-# JSON schema for structured output (OpenAI response_format)
+# JSON schema for structured output (OpenAI response_format, strict mode compatible)
+def _nullable(schema: dict) -> dict:
+    return {"anyOf": [schema, {"type": "null"}]}
+
 ACTION_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -29,24 +32,24 @@ ACTION_RESPONSE_SCHEMA = {
             "enum": list(ALLOWED_ACTIONS),
             "description": "Exactly one of the allowed robot actions.",
         },
-        "say": {
-            "type": ["string", "null"],
+        "say": _nullable({
+            "type": "string",
             "description": "Optional phrase for TTS when action is ask or say.",
-        },
-        "wait_for_response_s": {
-            "type": ["number", "null"],
+        }),
+        "wait_for_response_s": _nullable({
+            "type": "number",
             "description": "Optional seconds to listen for response (0-10). Only for ask.",
-        },
-        "next_phase": {
-            "type": ["string", "null"],
+        }),
+        "next_phase": _nullable({
+            "type": "string",
             "description": "Optional next phase value if transitioning.",
-        },
+        }),
         "confidence": {
             "type": "number",
             "description": "Confidence in this decision, 0 to 1.",
         },
     },
-    "required": ["action", "confidence"],
+    "required": ["action", "say", "wait_for_response_s", "next_phase", "confidence"],
     "additionalProperties": False,
 }
 
