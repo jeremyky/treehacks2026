@@ -1,0 +1,133 @@
+{# ─── Triage Report Template (Jinja2) ─────────────────────────────────── #}
+{# This template produces a "very nice" Markdown report with tables,       #}
+{# embedded images, badge-like formatting, and clear sections.             #}
+{# Context variables: report (TriageReport), meta (dict), now (str)        #}
+
+# Triage Assessment Report
+
+> **Generated:** {{ report.timestamp or now }}
+{%- if meta %}
+> **Session:** {{ meta.get("session_id", "—") }} | **Robot:** {{ meta.get("robot_id", "—") }} | **Operator:** {{ meta.get("operator_id", "—") }}
+{%- endif %}
+
+---
+
+## Scene Summary
+
+{{ report.scene_summary or "_No scene summary available._" }}
+
+---
+
+## Triage Findings
+
+{% if report.findings %}
+| # | Finding | Body Region | Confidence | Severity | Evidence |
+|---|---------|-------------|------------|----------|----------|
+{% for f in report.findings -%}
+| {{ loop.index }} | {{ f.label }} | `{{ f.body_region }}` | **{{ "%.2f"|format(f.confidence) }}** ({{ f.confidence_label }}) | {% if f.severity == "high" %}**HIGH**{% elif f.severity == "medium" %}MEDIUM{% else %}low{% endif %} | {% if f.evidence and f.evidence.crop_image %}[crop]({{ f.evidence.crop_image }}){% else %}—{% endif %} |
+{% endfor %}
+{% else %}
+_No findings detected._
+{% endif %}
+
+{% if report.findings %}
+### Evidence Gallery
+
+{% for f in report.findings %}
+#### Finding {{ loop.index }}: {{ f.label }} — `{{ f.body_region }}`
+
+- **Type:** {{ f.finding_type }}
+- **Confidence:** {{ "%.2f"|format(f.confidence) }} ({{ f.confidence_label }})
+- **Severity:** {{ f.severity }}
+- **Prompt:** "{{ f.prompt }}"
+- **Signals:** openvocab={{ f.signals.get("openvocab_score", "—") }}, red_ratio={{ f.signals.get("red_ratio", "—") }}
+
+{% if f.evidence %}
+| Annotated | Crop |
+|-----------|------|
+| ![annotated]({{ f.evidence.annotated_image }}) | ![crop]({{ f.evidence.crop_image }}) |
+{% endif %}
+
+{% endfor %}
+{% endif %}
+{% if report.scene_images %}
+### Scene Screenshots (all views)
+
+{% for img in report.scene_images %}
+![scene]({{ img }})
+{% endfor %}
+{% endif %}
+
+---
+
+## Victim Responses
+
+{% if report.victim_answers %}
+| Question | Response |
+|----------|----------|
+{% for qid, answer in report.victim_answers.items() -%}
+| {{ qid }} | {{ answer }} |
+{% endfor %}
+{% else %}
+_No victim responses recorded._
+{% endif %}
+
+{% if report.conversation_transcript %}
+## Conversation Transcript (full)
+
+{% for line in report.conversation_transcript %}
+- {{ line }}
+{% endfor %}
+
+---
+{% endif %}
+
+---
+
+## Recommended Actions
+
+{% if report.findings %}
+{% for f in report.findings %}
+{% if f.severity == "high" and "bleeding" in f.finding_type -%}
+- **URGENT:** Suspected heavy bleeding near `{{ f.body_region }}` (confidence {{ "%.2f"|format(f.confidence) }}). Request immediate responder. Maintain pressure if possible.
+{% elif f.severity == "high" -%}
+- **URGENT:** {{ f.label | capitalize }} near `{{ f.body_region }}` requires immediate attention.
+{% elif f.severity == "medium" -%}
+- **Monitor:** {{ f.label | capitalize }} near `{{ f.body_region }}` — maintain contact, reassess.
+{% else -%}
+- **Note:** {{ f.label | capitalize }} near `{{ f.body_region }}` — low severity, continue observation.
+{% endif %}
+{%- endfor %}
+{% else %}
+- Continue assessment. No immediate action triggers detected.
+{% endif %}
+
+---
+
+{% if report.notes %}
+## Notes
+
+{% for note in report.notes %}
+- {{ note }}
+{% endfor %}
+
+---
+{% endif %}
+
+## Narrative Summary
+
+{% for f in report.findings %}
+{{ f.confidence_label | capitalize }} {{ f.finding_type.replace("suspected_", "") }} observed near {{ f.body_region }} (confidence {{ "%.2f"|format(f.confidence) }}).
+{%- if f.finding_type == "suspected_bleeding" and report.victim_answers.get("bleed_severity") %} Victim reports {{ report.victim_answers["bleed_severity"] }} bleeding.{% endif %}
+{%- if f.finding_type == "suspected_burn" and report.victim_answers.get("burn_blister") %} Victim reports: {{ report.victim_answers["burn_blister"] }}.{% endif %}
+{% endfor %}
+
+{% if not report.findings -%}
+_No injury cues detected in the assessed frames._
+{%- endif %}
+
+---
+
+> **Disclaimer**
+>
+> {{ report.disclaimer }}

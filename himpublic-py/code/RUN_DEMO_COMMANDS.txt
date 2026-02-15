@@ -1,0 +1,106 @@
+# Final demo: terminals and commands
+# Replace ROBOT_IP with your robot's IP (e.g. 192.168.10.102) and LAPTOP_IP with your laptop's IP on the same network (e.g. 192.168.10.xxx).
+# All "cd" commands assume you are in the repo root (e.g. treehacks2026). If not: use full paths or cd there first.
+
+# =============================================================================
+# DEPLOY TO ROBOT (do this first so walking + latest code work)
+# =============================================================================
+# Run these FROM YOUR LAPTOP (not in SSH). Replace ROBOT_IP and booster with your robot user/host.
+
+# 1) Copy the bridge server (must have the version that calls SDK Move for /velocity)
+scp himpublic-py/src/robot_bridge/server.py booster@ROBOT_IP:~/server.py
+
+# 2) Copy the demo and its dependencies so you can run the demo ON the robot (SSH)
+scp -r himpublic-py/code booster@ROBOT_IP:~/himpublic-py/
+scp -r himpublic-py/src booster@ROBOT_IP:~/himpublic-py/
+# If himpublic-py doesn't exist on robot yet:  scp -r himpublic-py booster@ROBOT_IP:~/
+
+# =============================================================================
+# OPTION A (recommended): RUN DEMO ON THE ROBOT (SSH) — like you used to
+# =============================================================================
+# Bridge runs on robot. Demo runs ON the robot too (in a second SSH terminal).
+# Demo talks to the bridge at 127.0.0.1:9090 so robot mic, speaker, motion, camera all work.
+# Command center stays on laptop so you see the UI in the browser.
+
+# --- ON LAPTOP (2 terminals) ---
+
+# Terminal 1 (Laptop): Command center
+cd himpublic-py
+python scripts/run_command_center.py
+
+# Terminal 2 (Laptop): Webapp
+cd webapp && npm run dev
+# Open in browser:  http://localhost:5173
+
+# --- ON ROBOT (SSH:  ssh booster@ROBOT_IP) — two terminals ---
+
+# Terminal 3 (SSH): Start the bridge first (camera, TTS, mic, motion — must use --allow-motion for walking)
+source /opt/ros/humble/setup.bash && python3 ~/server.py --allow-motion
+
+# Terminal 4 (SSH): Run the demo ON the robot. Bridge URL is localhost. Command center is laptop.
+cd ~/himpublic-py
+PYTHONPATH=src python3 code/hardcoded_demo.py --mode bridge --bridge-url http://127.0.0.1:9090 --command-center http://LAPTOP_IP:8000
+# Example:  PYTHONPATH=src python3 code/hardcoded_demo.py --mode bridge --bridge-url http://127.0.0.1:9090 --command-center http://192.168.10.50:8000
+# Use your laptop's IP for LAPTOP_IP so the robot can POST events/report to the command center.
+# Note: Robot needs internet (or speech_recognition + PyAudio) for ASR when demo runs on robot.
+# If listen always returns None, run the demo on the laptop (A-alt) so the laptop does ASR.
+
+# =============================================================================
+# OPTION A-alt: Demo on LAPTOP, bridge on robot (robot does audio + motion)
+# =============================================================================
+# Same as above but you run the demo script on the laptop; it talks to the robot's bridge over WiFi.
+# You must have deployed server.py to the robot so /velocity actually moves the robot.
+
+# --- ON ROBOT (SSH) — 1 terminal ---
+# source /opt/ros/humble/setup.bash && python3 ~/server.py --allow-motion
+
+# --- ON LAPTOP — 3 terminals (command center, webapp, demo) ---
+# Terminal 2:  cd himpublic-py && python scripts/run_command_center.py
+# Terminal 3:  cd webapp && npm run dev
+# Terminal 4:  cd himpublic-py && python code/hardcoded_demo.py --mode bridge --bridge-url http://ROBOT_IP:9090 --command-center http://127.0.0.1:8000
+
+
+# =============================================================================
+# OPTION B: Mock mode (no robot — test flow and command center on laptop only)
+# =============================================================================
+
+# Terminal 1 (Laptop): Command center
+cd himpublic-py && python scripts/run_command_center.py
+
+# Terminal 2 (Laptop): Webapp
+cd webapp && npm run dev
+
+# Terminal 3 (Laptop): Demo (type victim responses when prompted)
+cd himpublic-py && python code/hardcoded_demo.py --mode mock --command-center http://127.0.0.1:8000
+
+# Open browser:  http://localhost:5173  (or the port Vite shows)
+
+
+# =============================================================================
+# OPTION C: SDK on robot — demo runs ON the robot, posts to laptop's command center
+# =============================================================================
+
+# --- ON LAPTOP (2 terminals) ---
+# Terminal 1: Command center
+cd himpublic-py && python scripts/run_command_center.py
+
+# Terminal 2: Webapp
+cd webapp && npm run dev
+# Open:  http://localhost:5173
+
+# --- ON ROBOT (SSH) ---
+# Terminal 3 (SSH): Run demo on robot; CC URL must be laptop's IP so robot can POST
+cd himpublic-py   # or wherever repo is on robot
+python code/hardcoded_demo.py --mode robot --network eth0 --command-center http://LAPTOP_IP:8000
+# Example:  --command-center http://192.168.10.50:8000
+# For audio on laptop:  add  --use-local-audio  (robot motion on robot, mic/speaker on laptop)
+
+
+# =============================================================================
+# See command center in browser
+# =============================================================================
+# 1. Start command center (Terminal 2 in Option A/B, Terminal 1 in C).
+# 2. Start webapp (Terminal 3 in A/B, Terminal 2 in C).
+# 3. Open  http://localhost:5173  (or the port Vite prints).
+# 4. Start the demo (Terminal 4 in A, Terminal 3 in B, Terminal 3 on robot in C).
+# You should see: stage updates, comms (robot/victim), snapshots, and final report.

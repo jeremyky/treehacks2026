@@ -1,0 +1,138 @@
+{# ─── Speech-first triage report (victim words drive priority; vision = support only) ── #}
+{# Context: report (TriageReport with chief_complaint, triage_priority, do_asap, etc.)  #}
+
+# Triage Assessment Report
+
+> **Generated:** {{ report.timestamp or now }}
+{%- if meta %}
+> **Session:** {{ meta.get("session_id", "—") }} | **Robot:** {{ meta.get("robot_id", "—") }} | **Operator:** {{ meta.get("operator_id", "—") }}
+{%- endif %}
+
+---
+
+## 1) Chief Complaint (Victim's words)
+
+{{ report.chief_complaint or "_No victim statement._" }}
+
+---
+
+## 2) Mechanism / Context
+
+{{ report.mechanism_context or "_No mechanism described._" }}
+
+---
+
+## 3) Triage Priority (Speech-first)
+
+**Priority:** {{ report.triage_priority | upper }}
+
+**Rationale:** {{ report.priority_rationale }}
+
+---
+
+## 4) Suspected Injuries (ranked differential)
+
+{% if report.suspected_injuries_ranked %}
+| # | Suspected injury | Likelihood | Evidence: Victim | Vision | Context |
+|---|------------------|------------|------------------|--------|---------|
+{% for si in report.suspected_injuries_ranked -%}
+| {{ loop.index }} | {{ si.injury }} | {{ si.likelihood }} | {{ "✓" if si.evidence_victim else "—" }} | {{ "✓" if si.evidence_vision else "—" }} | {{ "✓" if si.evidence_context else "—" }} |
+{% endfor %}
+{% else %}
+_No suspected injuries listed (speech-first module may not have run)._
+{% endif %}
+
+---
+
+## 5) Do ASAP (robot + victim guidance, minutes)
+
+{% if report.do_asap %}
+{% for step in report.do_asap %}
+- {{ step }}
+{% endfor %}
+{% else %}
+- Call for human responders; transmit location and summary.
+- Continue assessment per protocol.
+{% endif %}
+
+---
+
+## 6) For Responders on Arrival
+
+{% if report.for_responders %}
+{% for step in report.for_responders %}
+- {{ step }}
+{% endfor %}
+{% else %}
+- Full primary survey; hemorrhage control if indicated; limb neurovascular exam; immobilization and imaging as indicated.
+{% endif %}
+
+---
+
+## 7) Visual Evidence (supporting only)
+
+{% if report.vision_findings_supporting %}
+{% for line in report.vision_findings_supporting %}
+- {{ line }}
+{% endfor %}
+{% endif %}
+{% if report.findings %}
+### Evidence gallery
+
+{% for f in report.findings %}
+- **{{ f.body_region }}:** {{ f.confidence_label }} (confidence {{ "%.2f"|format(f.confidence) }}) — visual only, not used for severity.
+{% if f.evidence and f.evidence.annotated_image %}
+  ![annotated]({{ f.evidence.annotated_image }}) ![crop]({{ f.evidence.crop_image }})
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if report.scene_images %}
+### Scene Screenshots (all views)
+
+{% for img in report.scene_images %}
+![scene]({{ img }})
+{% endfor %}
+{% endif %}
+{% if not report.vision_findings_supporting and not report.findings %}
+_No visual evidence captured._
+{% endif %}
+
+---
+
+## Victim Q&A (recorded)
+
+{% if report.victim_answers %}
+| Question / key | Response |
+|----------------|----------|
+{% for qid, answer in report.victim_answers.items() -%}
+| {{ qid }} | {{ answer }} |
+{% endfor %}
+{% else %}
+_No victim responses recorded._
+{% endif %}
+
+---
+
+{% if report.notes %}
+## Notes
+
+{% for note in report.notes %}
+- {{ note }}
+{% endfor %}
+
+---
+{% endif %}
+
+{% if report.conversation_transcript %}
+## Conversation Transcript (full)
+
+{% for line in report.conversation_transcript %}
+- {{ line }}
+{% endfor %}
+
+---
+{% endif %}
+
+> **Disclaimer**
+>
+> {{ report.disclaimer }}

@@ -13,8 +13,14 @@ Quick start (on robot via SSH):
   # 1) Install deps
   pip3 install fastapi uvicorn python-multipart --user
 
-  # 2) Source ROS2 (REQUIRED for camera — perception service owns /dev/video*)
-  source /opt/ros/humble/setup.bash
+  # 2) (Optional) Source ROS2 (recommended for camera)
+  # This robot may not have ROS2 Humble specifically. Discover the installed distro:
+  #   ls /opt/ros
+  # then:
+  #   source /opt/ros/<distro>/setup.bash
+  #
+  # If you can't/don't want ROS2, the bridge can still run for audio + motion;
+  # camera will fall back to V4L2 only if perception releases /dev/video* (see below).
 
   # 3) Run
   python3 server.py                         # read-only, motion disabled
@@ -696,6 +702,29 @@ def create_app(camera: CameraManager, allow_motion: bool = False) -> FastAPI:
             headers={"X-Duration-S": str(duration_s), "X-Sample-Rate": str(CAPTURE_RATE), "X-Channels": str(CAPTURE_CHANNELS)},
         )
 
+    # ── head: rotate head yaw (GATED, requires SDK) ──────────────────
+    @app.post("/head")
+    async def post_head(request: Request):
+        """Set head pose (yaw in radians). Requires --allow-motion and SDK."""
+        if not allow_motion:
+            return JSONResponse(
+                {"error": "motion_disabled", "detail": "Start bridge with --allow-motion"},
+                status_code=403,
+            )
+        body = await request.json()
+        yaw = float(body.get("yaw", 0.0))
+        if not _ensure_sdk_init() or _loco_client is None:
+            logger.warning("HEAD ignored: SDK not initialized")
+            return JSONResponse({"error": "SDK not initialized"}, status_code=503)
+        try:
+            _loco_client.RotateHead(0.0, yaw)
+            logger.info("HEAD yaw=%.3f rad", yaw)
+            return {"status": "ok", "yaw": yaw}
+        except Exception as e:
+            import traceback
+            logger.error("HEAD failed: %s\n%s", e, traceback.format_exc())
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # ── motion: set velocity (GATED) ────────────────────────────────
     @app.post("/velocity")
     async def post_velocity(request: Request):
@@ -707,12 +736,23 @@ def create_app(camera: CameraManager, allow_motion: bool = False) -> FastAPI:
         body = await request.json()
         vx = float(body.get("vx", 0.0))
         wz = float(body.get("wz", 0.0))
-        MAX_VX, MAX_WZ = 0.3, 0.5
+        MAX_VX, MAX_WZ = 0.5, 0.5
         vx = max(-MAX_VX, min(MAX_VX, vx))
         wz = max(-MAX_WZ, min(MAX_WZ, wz))
-        # TODO: Wire SDK Move RPC here
-        logger.info("VELOCITY cmd: vx=%.3f wz=%.3f (stub)", vx, wz)
-        return {"status": "ok", "vx": vx, "wz": wz, "note": "SDK motion stub"}
+        if not _ensure_sdk_init():
+            logger.warning("VELOCITY ignored: SDK not initialized")
+            return JSONResponse({"error": "SDK not initialized"}, status_code=503)
+        try:
+            if _loco_client is not None and _sdk is not None:
+                # Don't call ChangeMode on every velocity — mode should be set once via /mode endpoint
+                # Calling ChangeMode repeatedly causes jitter/shaking
+                _loco_client.Move(vx, 0.0, wz)
+                logger.info("VELOCITY applied: vx=%.3f wz=%.3f", vx, wz)
+            return {"status": "ok", "vx": vx, "wz": wz}
+        except Exception as e:
+            import traceback
+            logger.error("VELOCITY failed: %s\n%s", e, traceback.format_exc())
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     # ── SDK diagnostics ────────────────────────────────────────────────
     @app.get("/sdk_info")
@@ -848,7 +888,10 @@ def create_app(camera: CameraManager, allow_motion: bool = False) -> FastAPI:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="K1 Robot Bridge Server",
-        epilog="IMPORTANT: run  source /opt/ros/humble/setup.bash  before starting!",
+        epilog=(
+            "For ROS2 camera: source /opt/ros/<distro>/setup.bash before starting.\n"
+            "If ROS2 isn't installed/sourced, camera may still work via V4L2 only if perception releases /dev/video*."
+        ),
     )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=9090)

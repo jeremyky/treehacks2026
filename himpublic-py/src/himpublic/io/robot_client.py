@@ -198,6 +198,45 @@ class RobotBridgeClient:
             logger.warning("wave failed: %s", e)
             return False
 
+    def head(self, yaw_rad: float) -> bool:
+        """POST /head — set head yaw (radians).  Returns True on success."""
+        try:
+            resp = requests.post(
+                f"{self._base_url}/head",
+                json={"yaw": yaw_rad},
+                timeout=self._timeout,
+            )
+            if resp.status_code == 403:
+                logger.warning("Head control disabled on bridge")
+                return False
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning("head failed: %s", e)
+            return False
+
+    def set_mode(self, mode: str) -> bool:
+        """POST /mode — change robot mode. Returns True on success.
+        
+        Args:
+            mode: "prep", "walk", "damp", or "custom"
+                  prep and damp always allowed; walk/custom need --allow-motion on bridge
+        """
+        try:
+            resp = requests.post(
+                f"{self._base_url}/mode",
+                json={"mode": mode},
+                timeout=self._timeout,
+            )
+            if resp.status_code == 403:
+                logger.warning("Mode '%s' requires --allow-motion on bridge", mode)
+                return False
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning("set_mode(%s) failed: %s", mode, e)
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Pipeline adapters

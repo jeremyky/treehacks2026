@@ -16,7 +16,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "himpublic.comms.command_center_server:app",
-        host="127.0.0.1",
+        host="0.0.0.0",  # Listen on all interfaces so robot can reach us
         port=8000,
         reload=False,
     )

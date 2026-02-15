@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -146,6 +147,7 @@ class DialogueState:
     last_command_center_payload_hash: str = ""
     last_update_time: float = 0.0
     conversation_history: list[dict[str, str]] = field(default_factory=list)  # [{"role": ..., "content": ...}]
+    rephrase_used_for: str | None = None  # for rule-based fallback: track if we already rephrased a question
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +389,380 @@ def _apply_extracted_facts(
 
 
 # ---------------------------------------------------------------------------
+# C-alt) Rule-based extraction (fallback when LLM unavailable)
+# ---------------------------------------------------------------------------
+
+_BODY_PARTS = {
+    "left leg": ["left leg"], "right leg": ["right leg"], "leg": ["leg", "legs"],
+    "left arm": ["left arm"], "right arm": ["right arm"], "arm": ["arm", "arms"],
+    "head": ["head"], "neck": ["neck"], "chest": ["chest"], "back": ["back"],
+    "shoulder": ["shoulder", "shoulders"], "left shoulder": ["left shoulder"], "right shoulder": ["right shoulder"],
+    "knee": ["knee", "knees"], "ankle": ["ankle", "ankles"], "wrist": ["wrist", "wrists"],
+    "hip": ["hip", "hips"], "hand": ["hand", "hands"], "foot": ["foot", "feet"],
+    "abdomen": ["abdomen", "stomach", "belly", "tummy"], "rib": ["rib", "ribs"],
+}
+_HAZARD_KEYWORDS = {
+    "fire": ["fire", "burning", "flames"], "smoke": ["smoke", "smoky", "fumes"],
+    "gas": ["gas", "gas leak"], "water": ["water", "flooding", "flooded"],
+    "unstable_debris": ["collapsing", "unstable", "falling", "debris falling"],
+    "electrical": ["electrical", "wire", "wires", "electr"],
+}
+_SEVERE_BLEEDING = ["heavy", "lot of blood", "soaking", "pouring", "spurting", "gushing", "won't stop", "can't stop"]
+_MODERATE_BLEEDING = ["steady", "steady bleeding", "quite a bit", "some blood", "moderate"]
+_MILD_BLEEDING = ["little", "small", "minor", "slow", "just a bit", "trickle"]
+
+
+def _yes_no(text: str) -> bool | None:
+    """Quick yes/no detection with word-boundary awareness."""
+    t = text.strip().lower()
+    t_words = t.split()
+    t_word_set = set(t_words)
+    yes_phrases = ("no problem", "i do", "i am", "i can", "i'm not okay", "not really okay")
+    no_phrases = ("not really", "i'm not", "im not", "i can't", "i cant", "can't move", "cant move")
+    first_word = t_words[0] if t_words else ""
+    explicit_yes_start = first_word in ("yes", "yeah", "yep", "y", "ok", "okay", "sure")
+    explicit_no_start = first_word in ("no", "nope", "nah", "negative")
+    if explicit_yes_start:
+        return True
+    if explicit_no_start:
+        if "no problem" in t:
+            return True
+        return False
+    for phrase in no_phrases:
+        if phrase in t:
+            return False
+    for phrase in yes_phrases:
+        if phrase in t:
+            return True
+    yes_tokens = {"yes", "yeah", "yep", "ok", "okay", "sure", "right", "correct", "true"}
+    no_tokens = {"no", "nope", "nah", "negative"}
+    if t_word_set & no_tokens:
+        return False
+    if t_word_set & yes_tokens:
+        return True
+    return None
+
+
+def _extract_body_part(text: str) -> str | None:
+    t = text.strip().lower()
+    for canonical, patterns in sorted(_BODY_PARTS.items(), key=lambda kv: -len(kv[0])):
+        for pat in patterns:
+            if re.search(rf"\b{re.escape(pat)}\b", t):
+                return canonical
+    return None
+
+
+def _extract_pain_score(text: str) -> int | None:
+    m = re.search(r"\b([0-9]|10)\s*(?:/?\s*(?:out of\s*)?10)?\b", text.strip())
+    if m:
+        try:
+            v = int(m.group(1))
+            if 0 <= v <= 10:
+                return v
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_bleeding_severity(text: str) -> BleedingSeverity:
+    t = text.strip().lower()
+    for kw in _SEVERE_BLEEDING:
+        if kw in t:
+            return BleedingSeverity.SEVERE
+    for kw in _MILD_BLEEDING:
+        if kw in t:
+            return BleedingSeverity.MILD
+    for kw in _MODERATE_BLEEDING:
+        if kw in t:
+            return BleedingSeverity.MODERATE
+    return BleedingSeverity.UNKNOWN
+
+
+def _extract_hazards(text: str) -> list[str]:
+    t = text.strip().lower()
+    found: list[str] = []
+    for hazard, keywords in _HAZARD_KEYWORDS.items():
+        for kw in keywords:
+            if kw in t:
+                found.append(hazard)
+                break
+    return found
+
+
+def parse_victim_utterance(
+    text: str,
+    patient_state: PatientState,
+    current_question_key: str | None = None,
+) -> tuple[PatientState, dict[str, Any], dict[str, SlotConfidence]]:
+    """
+    Rule-based extraction from victim text (used when LLM is unavailable).
+    Updates patient_state in-place. Returns (patient_state, extracted_facts, confidences).
+    """
+    if not text or not text.strip():
+        return patient_state, {}, {}
+    t = text.strip().lower()
+    extracted: dict[str, Any] = {}
+    confidences: dict[str, SlotConfidence] = {}
+
+    if current_question_key in ("needs_help", "initial", None):
+        yn = _yes_no(text)
+        if yn is not None:
+            extracted["needs_help"] = yn
+            confidences["needs_help"] = SlotConfidence.HIGH
+        if any(w in t for w in ("hurt", "injured", "bleeding", "pain", "help", "stuck", "trapped")):
+            extracted["needs_help"] = True
+            confidences["needs_help"] = SlotConfidence.HIGH
+
+    if patient_state.conscious == Consciousness.UNKNOWN and len(text.split()) >= 2:
+            extracted["conscious"] = Consciousness.ALERT
+            confidences["conscious"] = SlotConfidence.MEDIUM
+
+    bleeding_mentioned = any(w in t for w in ("bleed", "bleeding", "blood", "hemorrhage", "hemorrhaging"))
+    if bleeding_mentioned or current_question_key in ("major_bleeding", "massive_bleeding"):
+        yn = _yes_no(text)
+        if current_question_key in ("major_bleeding", "massive_bleeding"):
+            if yn is True:
+                extracted["major_bleeding"] = True
+                confidences["major_bleeding"] = SlotConfidence.HIGH
+            elif yn is False:
+                extracted["major_bleeding"] = False
+                confidences["major_bleeding"] = SlotConfidence.HIGH
+            elif bleeding_mentioned:
+                extracted["major_bleeding"] = True
+                confidences["major_bleeding"] = SlotConfidence.MEDIUM
+        elif bleeding_mentioned:
+            extracted["major_bleeding"] = True
+            confidences["major_bleeding"] = SlotConfidence.MEDIUM
+
+    if bleeding_mentioned or current_question_key in ("bleeding_location", "massive_bleeding_where", "injury_location_detail"):
+        body_part = _extract_body_part(text)
+        if body_part:
+            extracted["bleeding_location"] = body_part
+            confidences["bleeding_location"] = SlotConfidence.HIGH
+
+    if bleeding_mentioned or current_question_key == "bleeding_severity":
+        sev = _extract_bleeding_severity(text)
+        if sev != BleedingSeverity.UNKNOWN:
+            extracted["bleeding_severity"] = sev
+            confidences["bleeding_severity"] = SlotConfidence.MEDIUM
+
+    if current_question_key in ("breathing_distress", "breathing_trouble") or any(w in t for w in ("breath", "breathing", "breathe", "asthma", "wheez", "choking")):
+        if current_question_key in ("breathing_distress", "breathing_trouble"):
+            yn = _yes_no(text)
+            if yn is True:
+                extracted["breathing_distress"] = True
+                confidences["breathing_distress"] = SlotConfidence.HIGH
+            elif yn is False:
+                extracted["breathing_distress"] = False
+                confidences["breathing_distress"] = SlotConfidence.HIGH
+        elif any(w in t for w in ("can't breathe", "hard to breathe", "trouble breathing", "difficulty breathing", "short of breath")):
+            extracted["breathing_distress"] = True
+            confidences["breathing_distress"] = SlotConfidence.MEDIUM
+
+    if current_question_key == "chest_injury" or any(w in t for w in ("chest", "hole in chest")):
+        if current_question_key == "chest_injury":
+            yn = _yes_no(text)
+            if yn is not None:
+                extracted["chest_injury"] = yn
+                confidences["chest_injury"] = SlotConfidence.HIGH
+
+    if current_question_key in ("trapped_or_cant_move", "mobility") or any(w in t for w in ("trapped", "stuck", "pinned", "can't move", "cant move")):
+        if current_question_key in ("trapped_or_cant_move", "mobility"):
+            yn = _yes_no(text)
+            if yn is True or any(w in t for w in ("trapped", "stuck", "pinned", "can't move", "cant move")):
+                extracted["trapped_or_cant_move"] = True
+                confidences["trapped_or_cant_move"] = SlotConfidence.HIGH
+            elif yn is False:
+                extracted["trapped_or_cant_move"] = False
+                confidences["trapped_or_cant_move"] = SlotConfidence.HIGH
+        else:
+            extracted["trapped_or_cant_move"] = True
+            confidences["trapped_or_cant_move"] = SlotConfidence.MEDIUM
+
+    body_part = _extract_body_part(text)
+    if body_part and (current_question_key in ("pain", "pain_locations") or "hurt" in t or "pain" in t):
+        if body_part not in patient_state.pain_locations:
+            patient_state.pain_locations.append(body_part)
+            extracted["pain_locations"] = list(patient_state.pain_locations)
+            confidences["pain_locations"] = SlotConfidence.HIGH
+
+    pain_score = _extract_pain_score(text)
+    if pain_score is not None:
+        extracted["pain_score"] = pain_score
+        confidences["pain_score"] = SlotConfidence.HIGH
+
+    if current_question_key == "head_injury" or any(w in t for w in ("hit my head", "black out", "blacked out", "concuss")):
+        if current_question_key == "head_injury":
+            yn = _yes_no(text)
+            if yn is not None:
+                extracted["head_injury"] = yn
+                confidences["head_injury"] = SlotConfidence.HIGH
+        else:
+            extracted["head_injury"] = True
+            confidences["head_injury"] = SlotConfidence.MEDIUM
+
+    if current_question_key == "shock_signs" or any(w in t for w in ("dizzy", "faint", "clammy", "lightheaded")):
+        if current_question_key == "shock_signs":
+            yn = _yes_no(text)
+            if yn is not None:
+                extracted["shock_signs"] = yn
+                confidences["shock_signs"] = SlotConfidence.HIGH
+        else:
+            extracted["shock_signs"] = True
+            confidences["shock_signs"] = SlotConfidence.MEDIUM
+
+    if current_question_key in ("feeling_cold", "keep_warm"):
+        yn = _yes_no(text)
+        if yn is not None:
+            extracted["feeling_cold"] = yn
+            confidences["feeling_cold"] = SlotConfidence.HIGH
+
+    if current_question_key == "consent_photos":
+        yn = _yes_no(text)
+        if yn is not None:
+            extracted["consent_photos"] = yn
+            confidences["consent_photos"] = SlotConfidence.HIGH
+
+    hazards = _extract_hazards(text)
+    if hazards:
+        for h in hazards:
+            if h not in patient_state.hazards_present:
+                patient_state.hazards_present.append(h)
+        extracted["hazards_present"] = list(patient_state.hazards_present)
+        confidences["hazards_present"] = SlotConfidence.HIGH
+
+    if current_question_key in ("small_bleeds", "other_wounds") and t and t not in ("no", "nope", "nah", "n"):
+            yn = _yes_no(text)
+            if yn is not False:
+                extracted["other_wounds"] = text.strip()
+                confidences["other_wounds"] = SlotConfidence.MEDIUM
+
+    if current_question_key in ("search_location_hint", "location_hint"):
+        extracted["location_hint"] = text.strip()
+        confidences["location_hint"] = SlotConfidence.MEDIUM
+
+    if current_question_key == "airway_talking":
+        yn = _yes_no(text)
+        if yn is not None:
+            if yn:
+                extracted["conscious"] = Consciousness.ALERT
+                confidences["conscious"] = SlotConfidence.HIGH
+            else:
+                extracted["conscious"] = Consciousness.VERBAL
+                confidences["conscious"] = SlotConfidence.MEDIUM
+
+    for slot, value in extracted.items():
+        conf = confidences.get(slot, SlotConfidence.MEDIUM)
+        if hasattr(patient_state, slot) and slot not in ("pain_locations", "hazards_present"):
+            patient_state.set_slot(slot, value, conf)
+
+    if text.strip():
+        if patient_state.notes_freeform:
+            patient_state.notes_freeform += f" | {text.strip()}"
+        else:
+            patient_state.notes_freeform = text.strip()
+
+    return patient_state, extracted, confidences
+
+
+# ---------------------------------------------------------------------------
+# C) Question bank and next-question selection (for rule-based fallback)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuestionDef:
+    """A triage question definition (used when LLM is unavailable)."""
+    key: str
+    text: str
+    slot_checked: str
+    priority: int
+    prerequisite_slot: str | None = None
+    prerequisite_value: Any = None
+
+
+QUESTION_BANK: list[QuestionDef] = [
+    QuestionDef("needs_help", "Can you hear me? Do you need help?", "needs_help", 1),
+    QuestionDef("trapped_or_cant_move", "Are you pinned or trapped by anything? Can you move your arms and legs?", "trapped_or_cant_move", 2),
+    QuestionDef("major_bleeding", "Is there any heavy bleeding right now?", "major_bleeding", 3),
+    QuestionDef("bleeding_location", "Where is the bleeding?", "bleeding_location", 3, "major_bleeding", True),
+    QuestionDef("breathing_distress", "Are you having trouble breathing?", "breathing_distress", 4),
+    QuestionDef("chest_injury", "Any injury or pain in your chest?", "chest_injury", 4),
+    QuestionDef("pain", "Where does it hurt most? Rate your pain from 0 to 10 if you can.", "pain_score", 5),
+    QuestionDef("consent_photos", "Is it okay if I take a few photos for the medics?", "consent_photos", 6),
+]
+
+_REPHRASE: dict[str, str] = {
+    "needs_help": "I'm here to help. Are you injured?",
+    "trapped_or_cant_move": "Are you pinned or stuck? Can you move?",
+    "major_bleeding": "Do you see any heavy bleeding?",
+    "bleeding_location": "Where is the bleeding?",
+    "breathing_distress": "How is your breathing?",
+    "chest_injury": "Any wound or pain in your chest?",
+    "pain": "Where does it hurt? Pain level 0 to 10?",
+    "consent_photos": "Okay to take a few photos for the medics?",
+}
+
+
+def _slot_is_unknown(patient_state: PatientState, slot_name: str) -> bool:
+    val = getattr(patient_state, slot_name, None)
+    if val is None:
+        return True
+    if isinstance(val, Enum) and val.value == "unknown":
+        return True
+    if isinstance(val, list) and not val:
+        return True
+    if isinstance(val, str) and not val:
+        return True
+    return False
+
+
+def _prerequisite_met(q: QuestionDef, patient_state: PatientState) -> bool:
+    if q.prerequisite_slot is None:
+        return True
+    val = getattr(patient_state, q.prerequisite_slot, None)
+    if isinstance(val, Enum):
+        return val.value == q.prerequisite_value
+    return val == q.prerequisite_value
+
+
+def choose_next_question(
+    patient_state: PatientState,
+    dialogue_state: DialogueState,
+    now: float | None = None,
+) -> tuple[str | None, str | None]:
+    """Choose next question by priority and prerequisites (used in rule-based fallback). Returns (question_key, question_text) or (None, None)."""
+    if now is None:
+        now = time.monotonic()
+    candidates: list[QuestionDef] = []
+    for q in QUESTION_BANK:
+        if not _slot_is_unknown(patient_state, q.slot_checked):
+            conf = patient_state.get_confidence(q.slot_checked)
+            if conf in (SlotConfidence.HIGH, SlotConfidence.MEDIUM):
+                continue
+        if not _prerequisite_met(q, patient_state):
+            continue
+        if q.key in dialogue_state.asked_question_turns:
+                continue
+        candidates.append(q)
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda q: q.priority)
+    chosen = candidates[0]
+    question_text = chosen.text
+    if chosen.key == dialogue_state.last_question_key:
+        if getattr(dialogue_state, "rephrase_used_for", None) == chosen.key:
+            if len(candidates) > 1:
+                chosen = candidates[1]
+                question_text = chosen.text
+            else:
+                return None, None
+        elif chosen.key in _REPHRASE:
+            question_text = _REPHRASE[chosen.key]
+            dialogue_state.rephrase_used_for = chosen.key
+    return chosen.key, question_text
+
+
+# ---------------------------------------------------------------------------
 # D) Command-center update dedup
 # ---------------------------------------------------------------------------
 
@@ -547,12 +923,26 @@ class TriageDialogueManager:
             next_q_key = llm_result.get("next_question_key")
             triage_complete = llm_result.get("triage_complete", False)
         else:
-            # Fallback: deterministic response
-            logger.warning("LLM unavailable; using fallback triage response.")
-            new_facts = {}
-            robot_utterance, next_q_key, _, triage_complete = _fallback_response(
-                self.patient_state, self.dialogue_state,
+            # Fallback: rule-based extraction + priority question bank (your original flow)
+            logger.warning("LLM unavailable; using rule-based triage (extraction + QUESTION_BANK).")
+            if victim_text and victim_text.strip():
+                _, new_facts, _ = parse_victim_utterance(
+                    victim_text.strip(),
+                    self.patient_state,
+                    current_question_key=self.dialogue_state.last_question_key,
+                )
+            else:
+                new_facts = {}
+            next_q_key, question_text = choose_next_question(
+                self.patient_state, self.dialogue_state, now,
             )
+            if next_q_key and question_text:
+                robot_utterance = question_text
+                triage_complete = False
+            else:
+                robot_utterance = "Thank you. I will now do a visual scan and send images to the medics."
+                next_q_key = None
+                triage_complete = True
 
         # Record question key
         if next_q_key:

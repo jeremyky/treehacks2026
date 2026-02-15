@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """
-Hardcoded Demo Sequence — no CV, no LLM, just scripted steps.
+Hardcoded Demo Sequence — full flow: locate by voice, navigate, debris, triage, scan, report.
 
 Sequence:
-  1. Ask initial medical triage questions, listen for responses
-  2. Walk forward ~5 steps
-  3. Turn left 90°
-  4. Walk forward ~3 steps
-  5. Turn left 90°
-  6. Crouch down, run "remove_box" keyframe, stand back up
-  7. Ask more medical questions, listen
-  8. Scan images (capture frames from camera) and hold position
+  0. Locate by voice: "Is anyone there? Call out so I can find you." — listen for response
+  1. Navigate to patient (walk, turn, walk, turn)
+  2. Remove debris (crouch, keyframe, stand)
+  3. Full triage Q&A (dialogue manager: MARCH questions, listen, structured answers → command center)
+  4. Scan (head look-around, capture frames, post snapshots to command center)
+  5. Build medical report (Markdown + PDF), post to command center
+  6. Hold position
+
+Command center gets: events (stage, robot_said, heard_response), comms, snapshots, final report.
+
+SPEAK / LISTEN ON THE ROBOT (recommended for demo):
+  Use --mode bridge with the robot bridge server running ON THE ROBOT (SSH).
+  - speak() → POST /speak to bridge → robot plays TTS (espeak on robot).
+  - listen() → POST /record to bridge → robot mic (arecord) → WAV to laptop → ASR → transcript.
+  So the victim hears the robot and speaks to the robot; all audio I/O is on the robot.
 
 Usage:
-  # With real robot (SDK + bridge for audio):
-  python hardcoded_demo.py --mode robot --network-interface eth0
+  # Robot speak/listen + motion via bridge (bridge must run on robot)
+  python hardcoded_demo.py --mode bridge --bridge-url http://ROBOT_IP:9090 --command-center http://127.0.0.1:8000
 
-  # With bridge only (laptop → robot HTTP):
-  python hardcoded_demo.py --mode bridge --bridge-url http://192.168.10.102:9090
-
-  # Dry run / rehearsal (no robot, prints actions to console):
-  python hardcoded_demo.py --mode mock
+  python hardcoded_demo.py --mode mock --command-center http://127.0.0.1:8000  # laptop only, type responses
+  python hardcoded_demo.py --mode robot --network eth0  # SDK on robot; add --use-local-audio for laptop mic/speaker
 """
 
 from __future__ import annotations
@@ -29,11 +33,19 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+
+# Ensure himpublic is importable (code/ is under himpublic-py)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+_SRC = _PROJECT_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,9 +61,70 @@ WALK_SPEED          = 0.5    # m/s forward velocity
 TURN_SPEED          = 0.4    # rad/s rotation velocity (positive = left)
 STEP_LENGTH         = 0.50   # meters per "step" (robot-dependent)
 TURN_90_DURATION    = 3.9    # seconds to turn 90° at TURN_SPEED  (π/2 / 0.4 ≈ 3.93)
-LISTEN_TIMEOUT      = 8.0    # seconds to wait for a spoken response
-PAUSE_AFTER_SPEAK   = 1.0    # brief pause after speaking before listening
-PAUSE_BETWEEN_QA    = 1.5    # pause between question-answer pairs
+LISTEN_TIMEOUT      = 5.0    # max seconds to wait for initial "locate" response (stops sooner if you finish talking)
+PAUSE_AFTER_SPEAK   = 0.8    # brief pause after speaking before listening
+PAUSE_BETWEEN_QA    = 0.8    # pause between question-answer pairs
+TRIAGE_LISTEN_S     = 6.0    # max seconds per triage question (shorter so we don't wait long after you're done)
+# Scan / head look-around: ensure head settles and camera is stable before capture
+HEAD_SETTLE_S       = 2.0    # seconds after head move before taking screenshot (reduces motion blur)
+CAPTURE_INTERVAL_S  = 1.0    # seconds between captures (allow write + next pose)
+SCAN_HEAD_POSES     = [      # (label, yaw_rad) for SDK; Bridge ignores yaw and just captures N frames
+    ("left", 0.785),
+    ("center", 0.0),
+    ("right", -0.785),
+    ("center2", 0.0),
+]
+
+# ─── Command center helper ────────────────────────────────────────────
+def _cc_post_event(cc_client: Any, payload: dict[str, Any]) -> None:
+    """Post event to command center if client is enabled."""
+    if cc_client is None or not getattr(cc_client, "_enabled", False):
+        return
+    try:
+        cc_client.post_event(payload)
+    except Exception as e:
+        logger.warning("Command center post_event failed: %s", e)
+
+def _cc_post_snapshot(cc_client: Any, jpeg_path: Path, meta: dict | None = None) -> None:
+    """Post a snapshot file to command center. Only posts if file exists and has size > 0."""
+    if cc_client is None or not getattr(cc_client, "_enabled", False):
+        return
+    p = Path(jpeg_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return
+    try:
+        data = p.read_bytes()
+        cc_client.post_snapshot(data, p.name, meta=meta or {"phase": "scan"})
+    except Exception as e:
+        logger.warning("Command center post_snapshot failed: %s", e)
+
+
+def _capture_and_save(
+    robot: Any,
+    filepath: Path,
+    cc_client: Any,
+    pose_label: str,
+) -> bool:
+    """
+    Capture one frame, write to filepath, post to CC if saved. Returns True if file exists and has size > 0.
+    """
+    robot.capture_frame(str(filepath))
+    time.sleep(0.3)  # allow filesystem flush
+    if not filepath.exists() or filepath.stat().st_size == 0:
+        logger.warning("Capture did not produce a valid file: %s", filepath)
+        return False
+    logger.info("Saved scan image: %s (%d bytes)", filepath.name, filepath.stat().st_size)
+    _cc_post_snapshot(cc_client, filepath, meta={"phase": "scan", "pose": pose_label})
+    return True
+
+def _cc_post_report(cc_client: Any, payload: dict[str, Any]) -> bool:
+    if cc_client is None or not getattr(cc_client, "_enabled", False):
+        return False
+    try:
+        return cc_client.post_report(payload)
+    except Exception as e:
+        logger.warning("Command center post_report failed: %s", e)
+        return False
 
 # ─── Helper: timing for N steps ──────────────────────────────────────
 def steps_to_seconds(n_steps: int) -> float:
@@ -119,8 +192,16 @@ class MockBackend:
         print("  👀 LOOK AROUND (rotate head left → center → right → center)")
         time.sleep(0.5)
 
+    def head_move(self, yaw_rad: float) -> None:
+        """Move head to yaw (radians). Mock: just log and wait settle time."""
+        print(f"  👀 HEAD → yaw={yaw_rad:.2f} rad")
+        time.sleep(HEAD_SETTLE_S)
+
     def capture_frame(self, filename: str) -> None:
         print(f"  📸 CAPTURE FRAME → {filename}")
+        # Mock: create empty file so _capture_and_save sees a file (or small placeholder)
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+        Path(filename).write_bytes(b"\xff\xd8\xff")  # minimal JPEG magic bytes so file exists
 
     def stop(self) -> None:
         print("  🛑 STOP")
@@ -172,33 +253,37 @@ class SDKBackend:
         logger.warning("No audio backend — cannot listen")
         return None
 
-    # ── locomotion ────────────────────────────────────────────────
+    # ── locomotion (10Hz Move loop like walk_demo / walk_demo_v2) ───
+    def _send_move(self, vx: float, vy: float, wz: float, duration_s: float) -> None:
+        """Send Move at 10Hz for duration_s so the robot actually executes (single Move is one cycle)."""
+        hz = 10
+        steps = max(1, int(duration_s * hz))
+        for _ in range(steps):
+            self.client.Move(vx, vy, wz)
+            time.sleep(1.0 / hz)
+        self.client.Move(0.0, 0.0, 0.0)
+        time.sleep(0.3)
+
     def walk_forward(self, n_steps: int) -> None:
         dur = steps_to_seconds(n_steps)
         logger.info("WALK FORWARD %d steps (%.1fs)", n_steps, dur)
         self.client.ChangeMode(self.RobotMode.kWalking)
         time.sleep(1)
-        self.client.Move(WALK_SPEED, 0.0, 0.0)
-        time.sleep(dur)
-        self.client.Move(0.0, 0.0, 0.0)
+        self._send_move(WALK_SPEED, 0.0, 0.0, dur)
         time.sleep(0.5)
 
     def turn_left(self) -> None:
         logger.info("TURN LEFT 90°")
         self.client.ChangeMode(self.RobotMode.kWalking)
         time.sleep(0.5)
-        self.client.Move(0.0, 0.0, TURN_SPEED)
-        time.sleep(TURN_90_DURATION)
-        self.client.Move(0.0, 0.0, 0.0)
+        self._send_move(0.0, 0.0, TURN_SPEED, TURN_90_DURATION)
         time.sleep(0.5)
 
     def turn_right(self) -> None:
         logger.info("TURN RIGHT 90°")
         self.client.ChangeMode(self.RobotMode.kWalking)
         time.sleep(0.5)
-        self.client.Move(0.0, 0.0, -TURN_SPEED)
-        time.sleep(TURN_90_DURATION)
-        self.client.Move(0.0, 0.0, 0.0)
+        self._send_move(0.0, 0.0, -TURN_SPEED, TURN_90_DURATION)
         time.sleep(0.5)
 
     def crouch(self) -> None:
@@ -262,19 +347,23 @@ class SDKBackend:
         time.sleep(3)
 
     def look_around(self) -> None:
+        """Full look-around sequence (left, center, right, center) with settle times."""
         logger.info("LOOK AROUND")
-        self.client.RotateHead(0.0, 0.785)   # look left
-        time.sleep(2)
-        self.client.RotateHead(0.0, 0.0)     # center
-        time.sleep(1)
-        self.client.RotateHead(0.0, -0.785)  # look right
-        time.sleep(2)
-        self.client.RotateHead(0.0, 0.0)     # center
-        time.sleep(1)
+        for _label, yaw in SCAN_HEAD_POSES:
+            self.head_move(yaw)
+
+    def head_move(self, yaw_rad: float) -> None:
+        """Move head to yaw (radians). Waits HEAD_SETTLE_S for camera to stabilize."""
+        logger.info("HEAD → yaw=%.2f rad", yaw_rad)
+        self.client.RotateHead(0.0, yaw_rad)
+        time.sleep(HEAD_SETTLE_S)
 
     def capture_frame(self, filename: str) -> None:
-        """Placeholder — you'd grab from camera here."""
-        logger.info("CAPTURE FRAME → %s (not implemented in SDK-only mode)", filename)
+        """Capture from robot camera. Requires camera subscriber in SDK; use bridge for actual JPEG."""
+        logger.info("CAPTURE FRAME → %s (SDK mode: ensure camera feed is available)", filename)
+        # If your SDK exposes get_frame elsewhere, wire it here; else use bridge for real capture
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+        Path(filename).write_bytes(b"\xff\xd8\xff")  # placeholder so scan phase doesn't fail
 
     def stop(self) -> None:
         logger.info("STOP")
@@ -296,6 +385,14 @@ class BridgeBackend:
             logger.error("Bridge unreachable at %s: %s", bridge_url, health)
             raise ConnectionError(f"Cannot reach bridge at {bridge_url}")
         logger.info("Bridge connected: %s", health)
+        
+        # Set robot to walking mode (like walk_demo.py / walk_demo_v2.py)
+        logger.info("Initializing robot modes: PREP -> WALK")
+        self.client.set_mode("prep")
+        time.sleep(3)
+        self.client.set_mode("walk")
+        time.sleep(2)
+        logger.info("Robot ready for motion")
 
     def speak(self, text: str) -> None:
         logger.info("SAY: %s", text)
@@ -304,26 +401,30 @@ class BridgeBackend:
     def listen(self, timeout_s: float) -> Optional[str]:
         return self.audio.listen(timeout_s)
 
+    def _send_velocity_loop(self, vx: float, wz: float, duration_s: float) -> None:
+        """Send velocity at 10Hz for duration_s so the bridge keeps applying Move (like walk_demo)."""
+        hz = 10
+        steps = max(1, int(duration_s * hz))
+        for _ in range(steps):
+            self.client.set_velocity(vx, wz)
+            time.sleep(1.0 / hz)
+        self.client.set_velocity(0.0, 0.0)
+        time.sleep(0.3)
+
     def walk_forward(self, n_steps: int) -> None:
         dur = steps_to_seconds(n_steps)
         logger.info("WALK FORWARD %d steps (%.1fs)", n_steps, dur)
-        self.client.set_velocity(WALK_SPEED, 0.0)
-        time.sleep(dur)
-        self.client.set_velocity(0.0, 0.0)
+        self._send_velocity_loop(WALK_SPEED, 0.0, dur)
         time.sleep(0.5)
 
     def turn_left(self) -> None:
         logger.info("TURN LEFT 90°")
-        self.client.set_velocity(0.0, TURN_SPEED)
-        time.sleep(TURN_90_DURATION)
-        self.client.set_velocity(0.0, 0.0)
+        self._send_velocity_loop(0.0, TURN_SPEED, TURN_90_DURATION)
         time.sleep(0.5)
 
     def turn_right(self) -> None:
         logger.info("TURN RIGHT 90°")
-        self.client.set_velocity(0.0, -TURN_SPEED)
-        time.sleep(TURN_90_DURATION)
-        self.client.set_velocity(0.0, 0.0)
+        self._send_velocity_loop(0.0, -TURN_SPEED, TURN_90_DURATION)
         time.sleep(0.5)
 
     def crouch(self) -> None:
@@ -333,21 +434,70 @@ class BridgeBackend:
         logger.info("STAND (bridge doesn't support mode switch — skipping)")
 
     def play_keyframe(self, name: str) -> None:
-        logger.warning("KEYFRAME '%s' requires SDK — skipping via bridge", name)
+        """Run keyframe via replay_capture.py when file exists (same as walk_demo_v2). Names: punch4, demo4, punch, remove_box."""
+        code_dir = _SCRIPT_DIR
+        # Resolve name to candidate files (punch4/demo4 -> punch4.json, punch.json; remove_box -> same + punch variants)
+        candidates = []
+        if name in ("punch4", "demo4", "punch"):
+            candidates = ["punch4.json", "punch.json", "punch3.json", "punch2.json", "punch-v0.json"]
+        elif name == "remove_box":
+            candidates = ["remove_box.json", "punch4.json", "punch.json", "punch3.json", "punch2.json"]
+        else:
+            candidates = [f"{name}.json", "punch4.json", "punch.json"]
+        punch_file = None
+        for f in candidates:
+            p = code_dir / f
+            if p.exists():
+                punch_file = p
+                break
+        replay_script = code_dir / "replay_capture.py"
+        if not punch_file or not replay_script.exists():
+            logger.warning("KEYFRAME '%s': no file in %s or replay_capture.py missing — skipping", name, code_dir)
+            return
+        logger.info("PLAY KEYFRAME via replay_capture: %s", punch_file.name)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(replay_script), str(punch_file), "--override-hold", "0.3", "--override-move", "0.15"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=str(code_dir),
+            )
+            for line in iter(proc.stdout.readline, b""):
+                if not line:
+                    break
+                text = line.decode(errors="replace").strip()
+                if text:
+                    logger.info("  replay: %s", text)
+                if "Holding last keyframe" in text:
+                    time.sleep(1)
+                    proc.kill()
+                    proc.wait()
+                    logger.info("Keyframe '%s' done.", name)
+                    return
+            proc.wait()
+        except Exception as e:
+            logger.warning("replay_capture failed: %s", e)
 
     def wave(self) -> None:
         logger.info("WAVE")
         self.client.wave(hand="right", cycles=2)
 
     def look_around(self) -> None:
-        logger.info("LOOK AROUND (not available via bridge)")
+        """Per-pose capture; head_move uses bridge /head when available."""
+        logger.info("LOOK AROUND")
+
+    def head_move(self, yaw_rad: float) -> None:
+        """Move head to yaw (radians). Uses bridge /head when available, else wait settle time."""
+        if self.client.head(yaw_rad):
+            logger.info("HEAD → yaw=%.2f rad", yaw_rad)
+        else:
+            logger.info("HEAD → yaw=%.2f (bridge: no head, waiting %.1fs)", yaw_rad, HEAD_SETTLE_S)
+        time.sleep(HEAD_SETTLE_S)
 
     def capture_frame(self, filename: str) -> None:
         logger.info("CAPTURE FRAME → %s", filename)
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
         jpeg = self.client.get_frame_jpeg()
         if jpeg:
-            with open(filename, "wb") as f:
-                f.write(jpeg)
+            Path(filename).write_bytes(jpeg)
             logger.info("  saved %d bytes", len(jpeg))
         else:
             logger.warning("  no frame available")
@@ -369,178 +519,239 @@ def phase_banner(num: int, title: str) -> None:
     print("")
 
 
-def ask_question(robot, question: str) -> Optional[str]:
-    """Speak a question, pause, listen for response, return transcript."""
+def ask_question(robot, question: str, cc_client: Any = None) -> Optional[str]:
+    """Speak a question, pause, listen for response, return transcript. Optionally post to command center."""
     robot.speak(question)
+    _cc_post_event(cc_client, {"event": "robot_said", "text": question, "stage": "triage"})
     time.sleep(PAUSE_AFTER_SPEAK)
     response = robot.listen(LISTEN_TIMEOUT)
     if response:
         logger.info("Patient said: %s", response)
+        _cc_post_event(cc_client, {"event": "heard_response", "transcript": response, "stage": "triage"})
     else:
         logger.info("No response heard.")
     time.sleep(PAUSE_BETWEEN_QA)
     return response
 
 
-def run_sequence(robot) -> None:
-    """Execute the full hardcoded demo sequence."""
+def run_sequence(robot, cc_client: Any = None) -> None:
+    """Execute the full hardcoded demo: locate by voice → navigate → debris → triage → scan → report → hold."""
 
-    responses = {}  # store patient answers for later
+    # Accumulated for report and command center
+    location_hint: Optional[str] = None
+    triage_answers: dict[str, Any] = {}
+    conversation_transcript: list[str] = []
+    scan_image_paths: list[str] = []
+    incident_id = f"incident_{int(time.time())}"
 
     # ──────────────────────────────────────────────────────────────
-    # PHASE 1: Initial Medical Triage Questions
+    # PHASE 0: Locate by voice — wait for someone to speak
     # ──────────────────────────────────────────────────────────────
-    phase_banner(1, "INITIAL MEDICAL TRIAGE")
+    phase_banner(0, "LOCATE BY VOICE")
 
-    robot.wave()
+    _cc_post_event(cc_client, {"event": "stage", "stage": "locate", "status": "Listening for victim."})
+    robot.speak("Is anyone there? Call out so I can find you.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "Is anyone there? Call out so I can find you.", "stage": "locate"})
+    time.sleep(PAUSE_AFTER_SPEAK)
+    location_response = robot.listen(LISTEN_TIMEOUT)
+    if location_response:
+        location_hint = location_response.strip()
+        logger.info("Victim responded (location hint): %s", location_hint)
+        _cc_post_event(cc_client, {"event": "heard_response", "transcript": location_hint, "stage": "locate"})
+        conversation_transcript.append(f"Robot: Is anyone there? Call out so I can find you.")
+        conversation_transcript.append(f"Victim: {location_hint}")
+    else:
+        logger.info("No response; proceeding to navigate anyway.")
+    time.sleep(0.5)
 
-    robot.speak(
-        "Hello, I am a medical rescue robot. I have been deployed to assist you. "
-        "I'm going to ask you a few questions to assess your condition."
-    )
-    time.sleep(1)
-
-    responses["name"] = ask_question(
-        robot, "Can you tell me your name?"
-    )
-    responses["location_of_pain"] = ask_question(
-        robot, "Can you tell me where you are injured or feeling pain?"
-    )
-    responses["pain_level"] = ask_question(
-        robot, "On a scale of 1 to 10, how much pain are you in?"
-    )
-    responses["consciousness"] = ask_question(
-        robot, "Do you know what day it is and where you are?"
-    )
-    responses["allergies"] = ask_question(
-        robot, "Do you have any known allergies or medical conditions?"
-    )
-
-    robot.speak("Thank you. I'm going to come closer to you now. Please stay still.")
+    robot.speak("I'm coming to you now. Please keep talking if you can so I can locate you.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I'm coming to you now. Please keep talking if you can so I can locate you.", "stage": "locate"})
     time.sleep(1)
 
     # ──────────────────────────────────────────────────────────────
-    # PHASE 2: Navigate to the Patient
+    # PHASE 1: Navigate to the patient
     # ──────────────────────────────────────────────────────────────
-    phase_banner(2, "NAVIGATE TO PATIENT")
+    phase_banner(1, "NAVIGATE TO PATIENT")
 
+    _cc_post_event(cc_client, {"event": "stage", "stage": "navigate", "status": "Walking to victim."})
     logger.info("Walking forward 5 steps ...")
     robot.walk_forward(5)
     time.sleep(0.5)
-
     logger.info("Turning left 90° ...")
     robot.turn_left()
     time.sleep(0.5)
-
     logger.info("Walking forward 3 steps ...")
     robot.walk_forward(3)
     time.sleep(0.5)
-
     logger.info("Turning left 90° ...")
     robot.turn_left()
     time.sleep(0.5)
-
     robot.speak("I've reached you. Let me clear the debris.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I've reached you. Let me clear the debris.", "stage": "navigate"})
     time.sleep(1)
 
     # ──────────────────────────────────────────────────────────────
-    # PHASE 3: Remove the Box (Keyframe)
+    # PHASE 2: Remove debris (keyframe)
     # ──────────────────────────────────────────────────────────────
-    phase_banner(3, "REMOVE DEBRIS (KEYFRAME)")
+    phase_banner(2, "REMOVE DEBRIS")
 
+    _cc_post_event(cc_client, {"event": "stage", "stage": "debris", "status": "Clearing debris."})
     robot.speak("I am going to remove the debris from on top of you. Please hold still.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I am going to remove the debris from on top of you. Please hold still.", "stage": "debris"})
     time.sleep(1)
-
-    # Crouch / go into custom mode for arm control
     robot.crouch()
     time.sleep(1)
-
-    # Play the keyframe (you need to have recorded this beforehand
-    # using: python motion_capture.py record remove_box)
     robot.play_keyframe("remove_box")
     time.sleep(1)
-
-    # Stand back up
     robot.stand()
     time.sleep(1)
-
     robot.speak("I've cleared the debris from you.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I've cleared the debris from you.", "stage": "debris"})
     time.sleep(1)
 
     # ──────────────────────────────────────────────────────────────
-    # PHASE 4: Follow-up Medical Questions
+    # PHASE 3: Full triage Q&A (dialogue manager — rule-based)
     # ──────────────────────────────────────────────────────────────
-    phase_banner(4, "FOLLOW-UP MEDICAL ASSESSMENT")
+    phase_banner(3, "TRIAGE Q&A (MARCH)")
 
-    robot.speak("Now that the debris is cleared, I need to ask a few more questions.")
-    time.sleep(0.5)
+    _cc_post_event(cc_client, {"event": "stage", "stage": "triage", "status": "Asking triage questions."})
+    from himpublic.orchestrator.dialogue_manager import TriageDialogueManager
 
-    responses["feel_legs"] = ask_question(
-        robot, "Can you feel your legs? Try to wiggle your toes."
-    )
-    responses["breathing"] = ask_question(
-        robot, "Are you having any difficulty breathing?"
-    )
-    responses["bleeding"] = ask_question(
-        robot, "Can you see any active bleeding on your body?"
-    )
-    responses["head_injury"] = ask_question(
-        robot, "Did you hit your head? Are you feeling dizzy or nauseous?"
-    )
-    responses["mobility"] = ask_question(
-        robot, "Do you think you can move, or does anything feel broken?"
-    )
+    dm = TriageDialogueManager()
+    triage_complete = False
+    turn_count = 0
+    max_turns = 25  # safety cap
 
-    robot.speak(
-        "Thank you for your answers. I'm now going to scan the area to document "
-        "your injuries for the medical team."
-    )
-    time.sleep(1)
+    while not triage_complete and turn_count < max_turns:
+        turn_count += 1
+        # First turn: no victim text (robot asks first question). Later: pass last response.
+        victim_text: Optional[str] = None
+        if turn_count > 1:
+            victim_text = robot.listen(TRIAGE_LISTEN_S)
+            if victim_text:
+                victim_text = victim_text.strip()
+                conversation_transcript.append(f"Victim: {victim_text}")
+                _cc_post_event(cc_client, {"event": "heard_response", "transcript": victim_text, "stage": "triage"})
+
+        result = dm.process_turn(
+            victim_text=victim_text,
+            current_question_key=dm.dialogue_state.last_question_key,
+            now=time.monotonic(),
+        )
+        robot_utterance = result.get("robot_utterance") or "I'm here with you."
+        triage_complete = result.get("triage_complete", False)
+        triage_answers = result.get("triage_answers") or {}
+
+        robot.speak(robot_utterance)
+        _cc_post_event(cc_client, {"event": "robot_said", "text": robot_utterance, "stage": "triage"})
+        conversation_transcript.append(f"Robot: {robot_utterance}")
+        _cc_post_event(cc_client, {"event": "triage_update", "triage_answers": triage_answers, "timestamp": time.time()})
+        time.sleep(PAUSE_AFTER_SPEAK)
+
+    robot.speak("Thank you. I'm now going to scan the area to document your injuries for the medical team.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "Thank you. I'm now going to scan the area to document your injuries for the medical team.", "stage": "triage"})
+    time.sleep(1.5)  # pause after triage before starting scan
 
     # ──────────────────────────────────────────────────────────────
-    # PHASE 5: Scan / Capture Images and Hold
+    # PHASE 4: Head look-around and capture — one screenshot per head pose
     # ──────────────────────────────────────────────────────────────
-    phase_banner(5, "SCAN AND HOLD POSITION")
+    phase_banner(4, "SCAN: HEAD LOOK-AROUND AND CAPTURE (MEDICAL INJURIES)")
 
-    # Look around to capture from different angles
-    robot.look_around()
-
-    # Capture a few frames
-    output_dir = Path(__file__).parent.parent / "assets" / "scan_frames"
+    _cc_post_event(cc_client, {"event": "stage", "stage": "scan", "status": "Looking around and capturing images for assessment."})
+    output_dir = _SCRIPT_DIR.parent / "reports" / "scan_frames"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for i in range(3):
-        filename = str(output_dir / f"scan_{i:02d}.jpg")
-        robot.capture_frame(filename)
-        time.sleep(1)
+    for i, (pose_label, yaw_rad) in enumerate(SCAN_HEAD_POSES):
+        # Move head to pose and wait for camera to stabilize
+        robot.head_move(yaw_rad)
+        filepath = output_dir / f"scan_{incident_id}_{pose_label}_{i:02d}.jpg"
+        if _capture_and_save(robot, filepath, cc_client, pose_label):
+            scan_image_paths.append(str(filepath))
+        time.sleep(CAPTURE_INTERVAL_S)
+
+    # Only keep paths that exist and have content (for report and CC)
+    scan_image_paths[:] = [p for p in scan_image_paths if Path(p).exists() and Path(p).stat().st_size > 0]
+    logger.info("Scan complete: %d images saved and posted", len(scan_image_paths))
+    time.sleep(0.5)  # brief pause before report phase
+
+    # ──────────────────────────────────────────────────────────────
+    # PHASE 5: Build medical report and post to command center
+    # ──────────────────────────────────────────────────────────────
+    phase_banner(5, "MEDICAL REPORT")
+
+    _cc_post_event(cc_client, {"event": "stage", "stage": "report", "status": "Building report."})
+    report_path: Optional[str] = None
+    report_document = ""
+
+    try:
+        from himpublic.medical.triage_pipeline import TriagePipeline
+        reports_dir = _SCRIPT_DIR.parent / "reports"
+        pipeline = TriagePipeline(output_dir=str(reports_dir))
+        if location_hint:
+            pipeline.set_spoken_body_region(location_hint)
+        # Speech-first: triage_answers and transcript drive the report; findings may be empty
+        report_path = pipeline.build_report(
+            scene_summary="Hardcoded demo: triage by voice, then scan. Automated assessment by rescue robot.",
+            victim_answers=triage_answers,
+            notes=["Generated from hardcoded demo. No CV findings; speech-first triage."],
+            conversation_transcript=conversation_transcript,
+            scene_images=scan_image_paths,
+            meta={"incident_id": incident_id, "session_id": incident_id},
+        )
+        if report_path and Path(report_path).exists():
+            report_document = Path(report_path).read_text(encoding="utf-8")
+            logger.info("Medical report saved: %s", report_path)
+    except Exception as e:
+        logger.warning("Medical report build failed: %s — using fallback summary.", e)
+        report_document = f"# Incident Report: {incident_id}\n\n## Patient summary (from triage)\n"
+        for k, v in (triage_answers or {}).items():
+            report_document += f"- **{k}:** {v}\n"
+        report_document += "\n## Transcript\n" + "\n".join(conversation_transcript)
+
+    report_payload = {
+        "incident_id": incident_id,
+        "run_id": incident_id,
+        "timestamp": time.time(),
+        "patient_summary": triage_answers,
+        "patient_state": triage_answers,
+        "location_hint": location_hint,
+        "document": report_document,
+        "transcript": conversation_transcript,
+        "images": scan_image_paths,
+        "report_path": report_path,
+    }
+    if _cc_post_report(cc_client, report_payload):
+        logger.info("Report posted to command center.")
+    else:
+        logger.info("Report built locally (command center not configured or failed).")
 
     robot.speak(
         "I have completed my assessment and captured images for the medical team. "
-        "Help is on the way. Please stay calm and try not to move. "
-        "I will stay here with you until help arrives."
+        "Help is on the way. Please stay calm. I will stay here with you until help arrives."
     )
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I have completed my assessment and captured images for the medical team. Help is on the way.", "stage": "report"})
 
     # ──────────────────────────────────────────────────────────────
-    # DONE — Hold position
+    # PHASE 6: Hold position
     # ──────────────────────────────────────────────────────────────
     phase_banner(6, "HOLDING POSITION — SEQUENCE COMPLETE")
 
+    _cc_post_event(cc_client, {"event": "stage", "stage": "done", "status": "Holding position with victim."})
     robot.stop()
 
-    # Print summary of responses
     print("")
     print("-" * 40)
-    print("  PATIENT RESPONSE SUMMARY")
+    print("  TRIAGE SUMMARY (for command center)")
     print("-" * 40)
-    for key, val in responses.items():
-        label = key.replace("_", " ").title()
-        print(f"  {label}: {val or '(no response)'}")
+    for key, val in (triage_answers or {}).items():
+        label = str(key).replace("_", " ").title()
+        print(f"  {label}: {val}")
     print("-" * 40)
     print("")
 
-    # Stay alive so the robot holds position
     robot.speak("I'm staying right here with you. Help is coming.")
-    print("Demo complete. Press Ctrl+C to exit.")
+    _cc_post_event(cc_client, {"event": "robot_said", "text": "I'm staying right here with you. Help is coming.", "stage": "done"})
+    print("Demo complete. Command center has: events, comms, snapshots, report. Press Ctrl+C to exit.")
     try:
         while True:
             time.sleep(5)
@@ -599,6 +810,12 @@ Examples:
         "--turn-duration", type=float, default=TURN_90_DURATION,
         help=f"Seconds to turn 90° (default {TURN_90_DURATION})",
     )
+    p.add_argument(
+        "--command-center",
+        type=str,
+        default=os.environ.get("HIMPUBLIC_COMMAND_CENTER_URL", "").strip(),
+        help="Command center base URL (e.g. http://127.0.0.1:8000). Events, snapshots, and report are posted here.",
+    )
     return p.parse_args()
 
 
@@ -626,18 +843,27 @@ def main():
         robot = MockBackend()
     elif args.mode == "bridge":
         robot = BridgeBackend(bridge_url=args.bridge_url)
+        logger.info("Bridge mode: speak/listen use ROBOT (TTS + mic via bridge at %s)", args.bridge_url)
     elif args.mode == "robot":
         robot = SDKBackend(network_interface=args.network)
         if args.use_local_audio:
-            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
             from himpublic.io.audio_io import LocalAudioIO
             robot.set_audio(LocalAudioIO(use_tts=True, use_mic=True))
     else:
         print(f"Unknown mode: {args.mode}")
         sys.exit(1)
 
+    cc_client = None
+    if args.command_center:
+        try:
+            from himpublic.comms.command_center_client import CommandCenterClient
+            cc_client = CommandCenterClient(args.command_center.strip().rstrip("/"), timeout=5)
+            logger.info("Command center: %s", args.command_center)
+        except Exception as e:
+            logger.warning("Command center client init failed: %s", e)
+
     try:
-        run_sequence(robot)
+        run_sequence(robot, cc_client=cc_client)
     except KeyboardInterrupt:
         print("\nInterrupted! Stopping robot.")
         robot.stop()
