@@ -1,8 +1,8 @@
-# Search and Rescue Humanoid Robot — TreeHacks 2026
+# ADAM — Autonomous Disaster Assistance Manager
 
-> **Complete System Architecture & Setup Guide**
+> **Search-and-rescue humanoid for the Golden Hour.** TreeHacks 2026 · [adamrobotics.xyz](https://www.adamrobotics.xyz/)
 
-A full-stack autonomous search and rescue system using a Booster K1 humanoid robot with multimodal AI (LLM + VLM), medical triage, real-time telemetry, and operator command center.
+**ADAM** is a humanoid robot first-responder for post-disaster triage: it locates survivors (audio + vision), assesses injuries with LLM + VLM, and streams evidence-based reports to a remote operator dashboard—so responders can act without entering dangerous terrain.
 
 **Landing page:** [ADAM Robotics](https://www.adamrobotics.xyz/)
 
@@ -1482,20 +1482,14 @@ The Booster K1 is built on a **Jetson Orin NX** (Tensor Cores GPU @ 1173 MHz, 11
 
 ## Credits
 
-**Team**: TreeHacks 2026  
-**Robot**: Booster K1 Humanoid  
-**Models**: OpenAI (GPT-4o-mini, GPT-4-Vision), Ultralytics (YOLO, YOLO-World), Google MediaPipe  
+**ADAM** — Autonomous Disaster Assistance Manager · **TreeHacks 2026**  
+**Robot:** Booster K1 Humanoid  
+**Models:** OpenAI (GPT-4o-mini, GPT-4-Vision), Ultralytics (YOLO, YOLO-World), Google MediaPipe  
 
-**Acknowledgments:** Thank you to [HIM: Humans in Motion](https://www.himrobotics.com/) for lending us the K1 robot for TreeHacks 2026 at Stanford.  
+**Acknowledgments:** Thank you to [HIM: Humans in Motion](https://www.himrobotics.com/) for lending us the K1 robot for TreeHacks 2026 at Stanford.
 
 ---
 
 ## License
 
 MIT
-
----
-
-**GitHub repo description** (paste into the repo About / description, 350 char max):
-
-> Autonomous search-and-rescue with a Booster K1 humanoid: audio-guided victim localization, LLM + VLM medical triage, evidence-based reports, and a real-time operator dashboard. TreeHacks 2026.
